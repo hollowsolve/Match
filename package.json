@@ -1,0 +1,53 @@
+{
+  "name": "@hollowsolve/match",
+  "version": "1.0.0",
+  "description": "A pattern matching language that replaces regular expressions",
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/esm/index.d.ts"
+    }
+  },
+  "bin": {
+    "match-search": "./dist/esm/cli/search.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build": "npm run build:esm && npm run build:cjs && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "test": "node test-suite.cjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "keywords": [
+    "pattern",
+    "matching",
+    "regex",
+    "parser",
+    "peg"
+  ],
+  "author": "hollowsolve",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hollowsolve/Match.git"
+  },
+  "homepage": "https://matchlang.com",
+  "bugs": {
+    "url": "https://github.com/hollowsolve/Match/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "typescript": "^5.9.3"
+  }
+}
