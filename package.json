@@ -1,6 +1,6 @@
 {
   "name": "@hollowsolve/match",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A pattern matching language that replaces regular expressions",
   "type": "module",
   "main": "./dist/cjs/index.js",

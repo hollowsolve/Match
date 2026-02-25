@@ -30,6 +30,7 @@ const MULTI_WORD_KEYWORDS: [string[], TokenType][] = [
 
 // @lex-single-word-map
 const SINGLE_WORD_KEYWORDS: Record<string, TokenType> = {
+  'use': TokenType.Use,
   'then': TokenType.Then,
   'or': TokenType.Or,
   'except': TokenType.Except,

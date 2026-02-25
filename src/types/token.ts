@@ -79,6 +79,9 @@ export enum TokenType {
   CloseBrace = 'close brace',
   Tilde = 'tilde',
 
+  // modularity
+  Use = 'use',
+
   // structural
   QuotedLiteral = 'quoted_literal',
   ByteLiteral = 'byte_literal',

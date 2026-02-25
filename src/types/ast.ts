@@ -164,7 +164,19 @@ export interface RuleNode {
   column: number;
 }
 
+export interface UseNode {
+  module: string;
+  imports: string[];
+  line: number;
+  column: number;
+}
+
+export interface ParseOptions {
+  resolve?: Record<string, string>;
+}
+
 export interface MatchProgram {
+  uses: UseNode[];
   rules: RuleNode[];
   entryPoint: string;
 }

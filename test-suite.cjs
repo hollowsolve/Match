@@ -2450,6 +2450,131 @@ test('searchFolderStream: skips binary files', async () => {
 });
 
 // ============================================================
+// Grammar modularity (use)
+// ============================================================
+
+test('use: basic import resolves rules from module', () => {
+  const emailModule = `
+local: one or more letters
+domain: one or more letters joined by period
+  `;
+
+  const result = run(`
+use "email" (local, domain)
+main: local then at then domain
+  `, 'alice@foo.bar', { resolve: { email: emailModule } });
+
+  assert(result.matched === true, 'Should match');
+});
+
+test('use: imported rule dependencies are auto-resolved', () => {
+  const httpModule = `
+scheme: "http" then optional "s"
+authority: one or more of (letter, digit, period, hyphen)
+url: scheme then "://" then authority
+  `;
+
+  const result = run(`
+use "http" (url)
+main: url
+  `, 'https://example.com', { resolve: { http: httpModule } });
+
+  assert(result.matched === true, 'Should match — scheme and authority should be auto-imported');
+});
+
+test('use: missing module throws', () => {
+  let threw = false;
+  try {
+    run(`
+use "missing" (foo)
+main: foo
+    `, 'test');
+  } catch (e) {
+    threw = true;
+    assert(e.message.includes('Cannot resolve module'), `Expected resolve error, got: ${e.message}`);
+  }
+  assert(threw, 'Should have thrown');
+});
+
+test('use: missing rule in module throws', () => {
+  let threw = false;
+  try {
+    run(`
+use "mod" (nonexistent)
+main: nonexistent
+    `, 'test', { resolve: { mod: 'foo: one or more letters' } });
+  } catch (e) {
+    threw = true;
+    assert(e.message.includes('has no rule'), `Expected missing rule error, got: ${e.message}`);
+  }
+  assert(threw, 'Should have thrown');
+});
+
+test('use: duplicate import from same module is deduplicated', () => {
+  const mod = `
+num: one or more digits
+  `;
+
+  const result = run(`
+use "mod" (num, num)
+main: num
+  `, '42', { resolve: { mod } });
+
+  assert(result.matched === true, 'Should match');
+});
+
+test('use: multiple modules', () => {
+  const letters = 'word: one or more letters';
+  const numbers = 'num: one or more digits';
+
+  const result = run(`
+use "letters" (word)
+use "numbers" (num)
+main: word then equals then num
+  `, 'age=25', { resolve: { letters, numbers } });
+
+  assert(result.matched === true, 'Should match with rules from two modules');
+});
+
+test('use: local rules override imported for entry point', () => {
+  const mod = 'greeting: "hello"';
+
+  const result = run(`
+use "mod" (greeting)
+main: greeting then space then one or more letters
+  `, 'hello world', { resolve: { mod } });
+
+  assert(result.matched === true, 'Entry point should be local main');
+});
+
+test('use: multi-word rule names in imports', () => {
+  const mod = 'hex pair: hex digit then hex digit';
+  const src = 'use "mod" (hex pair)\nmain: hex pair';
+
+  const result = run(src, 'ff', { resolve: { mod } });
+
+  assert(result.matched === true, 'Should resolve multi-word imported rule');
+});
+
+test('use: no resolve map with use statement throws', () => {
+  let threw = false;
+  try {
+    run(`
+use "something" (foo)
+main: foo
+    `, 'test');
+  } catch (e) {
+    threw = true;
+  }
+  assert(threw, 'Should throw when resolve map is missing');
+});
+
+test('use: grammar without use statements still works with options', () => {
+  const result = run('main: one or more digits', '123', { resolve: {} });
+  assert(result.matched === true, 'Should work normally');
+});
+
+// ============================================================
 // Report
 // ============================================================
 

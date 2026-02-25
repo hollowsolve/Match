@@ -1,5 +1,5 @@
 import {
-  ASTNode, RuleNode, MatchProgram,
+  ASTNode, RuleNode, MatchProgram, UseNode,
   NamedCharNode, QuotedLiteralNode, ByteLiteralNode,
   CharClassNode, RangeNode, AnyOfNode, NoneOfNode,
   ExceptNode, TextBlockNode, RuleRefNode,
@@ -38,8 +38,8 @@ const CLASS_TOKENS = new Set<TokenType>([
 // @parse-class-tokens-end
 
 // @parse-main
-export function parse(tokens: Token[]): MatchProgram {
-  const parser = new Parser(tokens);
+export function parse(tokens: Token[], extraRuleNames?: Set<string>): MatchProgram {
+  const parser = new Parser(tokens, extraRuleNames);
   return parser.parseProgram();
 }
 
@@ -48,10 +48,13 @@ class Parser {
   private pos: number;
   private ruleNames: Set<string> = new Set();
 
-  constructor(tokens: Token[]) {
+  constructor(tokens: Token[], extraRuleNames?: Set<string>) {
     this.tokens = tokens;
     this.pos = 0;
     this.collectRuleNames();
+    if (extraRuleNames) {
+      for (const name of extraRuleNames) this.ruleNames.add(name);
+    }
   }
 
   private collectRuleNames() {
@@ -95,6 +98,12 @@ class Parser {
 
   // @parse-program
   parseProgram(): MatchProgram {
+    const uses: UseNode[] = [];
+
+    while (this.check(TokenType.Use)) {
+      uses.push(this.parseUse());
+    }
+
     const rules: RuleNode[] = [];
 
     while (!this.check(TokenType.EOF)) {
@@ -106,11 +115,46 @@ class Parser {
     }
 
     return {
+      uses,
       rules,
       entryPoint: rules[rules.length - 1].name,
     };
   }
   // @parse-program-end
+
+  // @parse-use
+  private parseUse(): UseNode {
+    const t = this.advance();
+    const moduleToken = this.peek();
+    if (moduleToken.type !== TokenType.Begin && moduleToken.type !== TokenType.QuotedLiteral) {
+      throw new ParseError('Expected quoted module name after "use"', moduleToken.line, moduleToken.column);
+    }
+    this.advance();
+    const moduleName = moduleToken.value;
+
+    this.expect(TokenType.OpenParenSyntax);
+    const imports: string[] = [];
+    imports.push(this.parseImportName());
+    while (this.match(TokenType.CommaSyntax)) {
+      imports.push(this.parseImportName());
+    }
+    this.expect(TokenType.CloseParenSyntax);
+
+    return { module: moduleName, imports, line: t.line, column: t.column };
+  }
+
+  private parseImportName(): string {
+    const parts: string[] = [];
+    if (this.peek().type !== TokenType.Identifier) {
+      throw new ParseError('Expected rule name in import list', this.peek().line, this.peek().column);
+    }
+    parts.push(this.advance().value);
+    while (this.check(TokenType.Identifier)) {
+      parts.push(this.advance().value);
+    }
+    return parts.join(' ');
+  }
+  // @parse-use-end
 
   // @parse-rule
   private parseRule(): RuleNode {

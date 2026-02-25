@@ -2,6 +2,8 @@
 
 A pattern matching language that replaces regular expressions. [Website](https://matchlang.com) · [Docs](https://matchlang.com/docs) · [Playground](https://matchlang.com/playground)
 
+> Free for personal, educational, and open-source use. Commercial use requires a [one-time license](https://matchlang.com).
+
 ## Install
 
 ```
@@ -198,6 +200,36 @@ csv: row joined by newline
 Multi-word rule names are supported: `token char`, `quoted value`, `hex pair`.
 
 Left recursion is detected at parse time and rejected.
+
+### Modules
+
+Import rules from other grammars with `use`:
+
+```
+use "email" (local, domain)
+
+main: local then at then domain
+```
+
+The `use` statement imports named rules (and their dependencies) from a module. Modules are resolved at parse time via a `resolve` map:
+
+```js
+import { run } from '@hollowsolve/match'
+
+const emailGrammar = `
+local: one or more letters
+domain: one or more letters joined by period
+`
+
+const result = run(`
+use "email" (local, domain)
+main: local then at then domain
+`, 'alice@example.com', {
+  resolve: { email: emailGrammar }
+})
+```
+
+Dependencies are auto-resolved — if `local` references another rule in the module, it gets pulled in too. Grammars without `use` work exactly as before.
 
 ### Precedence
 
