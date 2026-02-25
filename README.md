@@ -1,14 +1,6 @@
 # Match
 
-A pattern matching language that replaces regular expressions.
-
-```
-key: one or more letters
-value: one or more digits
-pair: key then equals then value
-```
-
-That matches `name=42`. Every rule is readable. Every failure tells you exactly why it didn't match.
+A pattern matching language that replaces regular expressions. [Website](https://matchlang.com) · [Docs](https://matchlang.com/docs) · [Playground](https://matchlang.com/playground)
 
 ## Install
 
@@ -16,23 +8,9 @@ That matches `name=42`. Every rule is readable. Every failure tells you exactly 
 npm install @hollowsolve/match
 ```
 
-```js
-import { run } from '@hollowsolve/match'
-
-const result = run('main: 4 digits', '2025')
-// { matched: true, bytes_consumed: 4, tree: { ... }, extracted: [] }
-
-const fail = run('main: one or more letters', '123')
-// { matched: false, offset: 0, expected: ["letter"], found: '"1" (0x31)', ... }
-```
-
-Both ESM and CommonJS are supported. Node 18+.
-
----
+ESM and CommonJS. Node 18+.
 
 ## Quick start
-
-Parse a key-value pair:
 
 ```js
 import { run, formatTree, formatFailure } from '@hollowsolve/match'
@@ -63,7 +41,7 @@ Find all matches in a string:
 import { parse, find } from '@hollowsolve/match'
 
 const program = parse('main: one or more digits')
-const matches = find(program, 'port 8080 and port 443')
+find(program, 'port 8080 and port 443')
 // [{ start: 5, end: 9, text: "8080" }, { start: 20, end: 23, text: "443" }]
 ```
 
@@ -237,66 +215,66 @@ So `a then b or c then d` means `(a then b) or (c then d)`.
 
 ---
 
-## A real parser
+## API
 
-```
-token char:
-  any of (
-    exclamation, hash, dollar, percent, ampersand,
-    single quote, asterisk, plus, period, caret,
-    underscore, backtick, pipe, tilde,
-    "0" to "9", "a" to "z", "A" to "Z", hyphen
-  )
+All functions are named exports from `@hollowsolve/match`.
 
-token: one or more token char
+### Core
 
-escaped:
-  backslash then any of (
-    tab, byte 0x20 to byte 0x7E, byte 0x80 to byte 0xFF
-  )
-
-qdtext:
-  any of (
-    printable except (double quote, backslash),
-    tab,
-    byte 0x80 to byte 0xFF
-  )
-
-quoted value:
-  double quote
-  then zero or more (qdtext or escaped)
-  then double quote
-
-value: token or quoted value
-
-param: token then equals then value
-
-element: param joined by semicolon
-
-ows: zero or more (space or tab)
-
-forwarded: element joined by comma then ows
+```ts
+run(source: string, input: string): MatchResult
 ```
 
-That's an [RFC 7239](https://www.rfc-editor.org/rfc/rfc7239) parser. Here's the regex it replaces:
+Parse a grammar and match it against input in one call. Returns `MatchSuccess` or `MatchFailure`.
 
+```ts
+parse(source: string): MatchProgram
+match(program: MatchProgram, input: string): MatchResult
 ```
-~^(,[ \t]*)*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*\"))...
+
+Separate compilation from matching. `parse` compiles and validates a grammar. `match` runs a compiled grammar against input. Use this when matching the same grammar against many inputs.
+
+### Search
+
+```ts
+find(program: MatchProgram, input: string): FindMatch[]
 ```
 
----
+Find all non-overlapping matches of a pattern within a string. Returns an array of `{ start, end, text, tree }`.
 
-## Why not regex
+```ts
+searchFile(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
+searchFolder(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
+searchFolderStream(program: MatchProgram, path: string, options?: SearchOptions): AsyncGenerator<LineMatch | SearchError>
+```
 
-| | Regex | Match |
-|---|---|---|
-| **Readability** | `[\x21\x23-\x5B]` | `visible except (double quote, backslash)` |
-| **Composability** | string concatenation | rules reference rules |
-| **Failure diagnostics** | `"no match"` | byte offset + expected set + rule stack |
-| **Time complexity** | exponential worst case | linear — PEG, no backtracking pathology |
-| **ReDoS** | yes | impossible |
-| **Named groups** | varies by engine | every rule is a named group |
-| **Escaping** | `\\ \" \n \t \x21 ...` | none |
+Line-oriented search. `searchFolder` is recursive and skips binary files, hidden dirs, and `node_modules`. `searchFolderStream` yields results as it walks instead of buffering.
+
+### Diagnostics
+
+```ts
+formatFailure(failure: MatchFailure, input?: string): string
+formatTree(tree: RuleMatch): string
+```
+
+`formatFailure` produces a human-readable diagnostic with a source pointer. `formatTree` produces a tree visualization.
+
+### Fast path
+
+```ts
+compile(program: MatchProgram): CompiledProgram
+fastMatch(cp: CompiledProgram, input: Uint8Array): number
+```
+
+Boolean-only matching. Returns bytes consumed on success, `-1` on failure. Skips tree building entirely.
+
+### Partial parsing
+
+```ts
+tryParse(source: string, input: string): MatchSuccess | PartialResult
+```
+
+Like `run`, but on failure returns a `PartialResult` with `bytes_consumed`, `partial_tree`, and `extracted` from the furthest-progressed branch. Intended for editor/IDE integration.
 
 ---
 
@@ -351,124 +329,6 @@ match failed at byte 47 (line 3, column 12):
               ^
 ```
 
-The `MatchFailure` structure and the `formatFailure` output format are stable public API. Tooling may depend on both.
-
----
-
-## API
-
-All functions are named exports from `@hollowsolve/match`.
-
-### Core
-
-```ts
-run(source: string, input: string): MatchResult
-```
-
-Parse a grammar and match it against input in one call. Returns `MatchSuccess` or `MatchFailure`.
-
-```ts
-parse(source: string): MatchProgram
-match(program: MatchProgram, input: string): MatchResult
-```
-
-Separate compilation from matching. `parse` compiles and validates a grammar. `match` runs a compiled grammar against input. Use this when matching the same grammar against many inputs.
-
-### Search
-
-```ts
-find(program: MatchProgram, input: string): FindMatch[]
-```
-
-Find all non-overlapping matches of a pattern within a string. Returns an array of `{ start, end, text, tree }`.
-
-```ts
-searchString(source: string, input: string, options?: SearchOptions): SearchResult
-searchFile(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
-searchFolder(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
-```
-
-Line-oriented search. `searchFile` and `searchFolder` operate on the filesystem. `searchFolder` is recursive and skips binary files, hidden files, `.git`, and `node_modules`.
-
-### Diagnostics
-
-```ts
-formatFailure(failure: MatchFailure, input?: string): string
-formatTree(tree: RuleMatch): string
-```
-
-Human-readable formatting. `formatFailure` produces the diagnostic shown above. `formatTree` produces a tree visualization:
-
-```
-param [0..9]
-├── token [0..3] "key"
-└── token [4..9] "value"
-```
-
-### Performance
-
-```ts
-compile(program: MatchProgram): CompiledProgram
-fastMatch(cp: CompiledProgram, input: Uint8Array): number
-```
-
-Low-level fast path for boolean matching. `compile` converts a parsed grammar into a bytecode-like representation. `fastMatch` runs it against raw bytes, returning the number of bytes consumed on success or `-1` on failure.
-
-```ts
-import { parse, compile, fastMatch } from '@hollowsolve/match'
-
-const program = parse('main: one or more digits')
-const cp = compile(program)
-const encoder = new TextEncoder()
-
-fastMatch(cp, encoder.encode('12345'))  // 5 (success — consumed all 5 bytes)
-fastMatch(cp, encoder.encode('abc'))    // -1 (failure)
-```
-
-Three execution tiers work together automatically:
-
-| Tier | When | Speed |
-|------|------|-------|
-| **JS fast path** | Inputs < 40 bytes, or WASM unavailable | ~2-5× faster than tree executor |
-| **WASM fast path** | Inputs ≥ 40 bytes in Node.js | ~5-10× faster than tree executor |
-| **Tree executor** | Always used for `match()`/`run()` results | Baseline — produces full parse trees |
-
-**How they interrelate:**
-
-The fast paths (JS and WASM) don't replace the tree executor — they act as **optimistic pre-checks**. When you call `match()` or `run()`:
-
-1. `parse()` compiles the grammar into an AST *and* a bytecode `CompiledProgram`, attached to the program object
-2. `match()` runs the fast path first (`wasmFastMatch`), which picks WASM for inputs ≥ 40 bytes or falls back to the JS fast path for smaller inputs / when WASM is unavailable
-3. If the fast path confirms success (bytes consumed == input length), the tree executor runs with failure tracking disabled — this is faster because it skips recording expected-sets and rule stacks
-4. If the fast path reports failure, the tree executor runs with full failure tracking to produce detailed diagnostics
-
-The tree executor always runs — it's the only path that produces parse trees and structured errors. The fast paths just tell it whether to bother tracking failure context.
-
-Use `compile` + `fastMatch` directly when you only need pass/fail and don't need parse trees — this skips the tree executor entirely.
-
-### Partial parsing
-
-```ts
-tryParse(source: string, input: string): MatchSuccess | PartialResult
-```
-
-Like `run`, but on failure returns a `PartialResult` instead of a `MatchFailure`:
-
-```ts
-{
-  matched: false,
-  bytes_consumed: number,       // how far the furthest branch got
-  partial_tree: RuleMatch | null, // tree built before failure
-  extracted: RuleMatch[],       // extracts collected before failure
-  offset: number, line: number, column: number,
-  expected: string[], found: string, rule_stack: string[]
-}
-```
-
-When backtracking is involved, the partial tree reflects the **furthest-progressed** branch (most bytes consumed), not the last-attempted one. The tree contains only fully matched nodes.
-
-Intended for editor/IDE integration: incremental validation, error highlighting, autocomplete context.
-
 ---
 
 ## CLI
@@ -502,7 +362,7 @@ Every character has a name. No escape sequences exist.
 
 > **Unicode.** `any character` and `none of` consume one UTF-8 codepoint (1-4 bytes). `cafe` is 4 `any character` matches, not 5. All other classes (`letter`, `digit`, etc.) match ASCII bytes only.
 >
-> **Byte ranges.** `byte 0x80 to byte 0xFF` operates byte-by-byte. Mixing codepoint-aware constructs (`any character`, `none of`) with high byte ranges (>= 0x80) in the same rule is a compile error — split them into separate rules instead. This prevents misaligned positions where `any character` advances 2-4 bytes but a byte range advances 1.
+> **Byte ranges.** `byte 0x80 to byte 0xFF` operates byte-by-byte. Mixing codepoint-aware constructs (`any character`, `none of`) with high byte ranges (>= 0x80) in the same rule is a compile error — split them into separate rules instead.
 
 ---
 
@@ -514,7 +374,7 @@ The following are stable public API as of v1.0:
 - `formatFailure` output format — structure and field layout
 - All exported function signatures
 
-These will not change in backward-incompatible ways without a major version bump. Tooling (linters, editor integrations, CI pipelines) may depend on these interfaces.
+These will not change in backward-incompatible ways without a major version bump.
 
 ---
 

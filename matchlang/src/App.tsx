@@ -467,6 +467,15 @@ function Hero() {
   )
 }
 
+const SYMBOL_MAP: Record<string, string> = {
+  'hyphen': '-', 'equals': '=', 'period': '.', 'comma': ',',
+  'colon': ':', 'hash': '#', 'slash': '/', 'underscore': '_',
+  'at': '@', 'bang': '!', 'backslash': '\\',
+  'double quote': '"', 'single quote': "'", 'open paren': '(',
+  'close paren': ')', 'asterisk': '*', 'caret': '^', 'tilde': '~',
+  'pipe': '|', 'semicolon': ';', 'space': '␣', 'newline': '\\n',
+}
+
 const TILE_WORDS = [
   'digit', 'letter', 'one or more', 'then', 'any of', 'none of',
   'joined by', 'extract', 'optional', 'zero or more', 'or', 'isn\'t',
@@ -483,12 +492,16 @@ function PatternTile({ word, delay }: { word: string; delay: number }) {
   const [flipped, setFlipped] = useState(() => Math.random() < 0.3)
   const [inverted, setInverted] = useState(() => Math.random() < 0.25)
   const [rotation, setRotation] = useState(() => Math.random() < 0.3 ? 180 : 0)
+  const [showSymbol, setShowSymbol] = useState(false)
+  const hasSymbol = word in SYMBOL_MAP
 
   const doRandom = () => {
     const action = Math.random()
-    if (action < 0.4) {
+    if (hasSymbol && action < 0.3) {
+      setShowSymbol(s => !s)
+    } else if (action < 0.55) {
       setFlipped(f => !f)
-    } else if (action < 0.7) {
+    } else if (action < 0.8) {
       setInverted(v => !v)
     } else {
       const dir = Math.random() < 0.5 ? 90 : -90
@@ -538,8 +551,8 @@ function PatternTile({ word, delay }: { word: string; delay: number }) {
           backfaceVisibility: 'hidden',
         }}
       >
-        <span style={{ transform: flipped ? 'scaleX(-1)' : 'none', transition: 'transform 0.6s' }}>
-          {word}
+        <span style={{ transform: flipped ? 'scaleX(-1)' : 'none', transition: 'transform 0.6s', fontSize: showSymbol ? 22 : 12.5 }}>
+          {showSymbol ? SYMBOL_MAP[word] : word}
         </span>
       </motion.div>
     </motion.div>
@@ -958,9 +971,8 @@ function Metrics() {
 }
 
 function Compare() {
-  const [expanded, setExpanded] = useState(false)
-
-  const regexCompact = "(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|\"(?:[\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f\\x21\\x23-\\x5b\\x5d-\\x7f]|\\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f])*\")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f\\x21-\\x5a\\x53-\\x7f]|\\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f])+)\\])"
+  const [scrolledToBottom, setScrolledToBottom] = useState(false)
+  const regexScrollRef = useRef<HTMLDivElement>(null)
 
   const regexExpanded = [
     "(?:                                  # local part",
@@ -994,6 +1006,12 @@ function Compare() {
     ")",
   ].join("\n")
 
+  const handleRegexScroll = () => {
+    const el = regexScrollRef.current
+    if (!el) return
+    setScrolledToBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 4)
+  }
+
   return (
     <section id="compare" style={{ padding: '128px 24px', maxWidth: 1400, margin: '0 auto' }}>
       <FadeIn>
@@ -1016,48 +1034,54 @@ function Compare() {
           gap: 1, maxWidth: 1200, margin: '0 auto',
           background: T.border, borderRadius: T.radius, overflow: 'hidden',
         }}>
-          <div style={{ background: T.bg, padding: 0 }}>
+          <div style={{ background: T.bg, padding: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{
               padding: '12px 20px',
               borderBottom: `1px solid ${T.border}`,
               fontSize: 11, color: T.textMuted, fontWeight: 600,
               letterSpacing: '0.06em', textTransform: 'uppercase',
               fontFamily: T.mono,
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            }}>
-              <span>regex</span>
-              <button
-                onClick={() => setExpanded(!expanded)}
+            }}>regex</div>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <div
+                ref={regexScrollRef}
+                onScroll={handleRegexScroll}
                 style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  fontSize: 10, color: T.textFaint, fontFamily: T.mono,
-                  letterSpacing: '0.04em', padding: '2px 0',
-                  transition: 'color 0.2s',
+                  overflowY: 'auto',
+                  maxHeight: 420,
                 }}
-                onMouseEnter={e => (e.currentTarget.style.color = T.textSecondary)}
-                onMouseLeave={e => (e.currentTarget.style.color = T.textFaint)}
               >
-                {expanded ? 'compact' : 'expand'}
-              </button>
-            </div>
-            <div style={{ position: 'relative', overflow: 'hidden' }}>
-              <AnimatePresence mode="wait">
-                <motion.pre
-                  key={expanded ? 'expanded' : 'compact'}
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                  style={{
-                    padding: 20, margin: 0,
-                    fontSize: 12.5, fontFamily: T.mono,
-                    color: T.textSecondary,
-                    lineHeight: expanded ? 1.8 : 1.6,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-all',
-                  }}
-                >{expanded ? regexExpanded : regexCompact}</motion.pre>
-              </AnimatePresence>
+                <pre style={{
+                  padding: 20, margin: 0,
+                  fontSize: 12.5, fontFamily: T.mono,
+                  color: T.textSecondary,
+                  lineHeight: 1.8,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                }}>{regexExpanded}</pre>
+              </div>
+              <div style={{
+                position: 'absolute', bottom: 0, left: 0, right: 0,
+                height: 64,
+                background: `linear-gradient(transparent, ${T.bg})`,
+                display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+                paddingBottom: 12,
+                pointerEvents: 'none',
+                opacity: scrolledToBottom ? 0 : 1,
+                transition: 'opacity 0.3s',
+              }}>
+                <span style={{
+                  fontSize: 11, fontFamily: T.mono, color: T.textFaint,
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  letterSpacing: '0.04em',
+                  pointerEvents: 'auto', cursor: 'pointer',
+                }} onClick={() => regexScrollRef.current?.scrollTo({ top: regexScrollRef.current.scrollHeight, behavior: 'smooth' })}>
+                  keep reading
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              </div>
             </div>
           </div>
 
