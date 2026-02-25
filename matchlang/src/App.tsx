@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react'
 import { motion, useInView, AnimatePresence } from 'framer-motion'
 import { Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom'
 import { CONFIG } from './config'
@@ -11,8 +11,8 @@ import { GridRipple } from './components/GridRipple'
 import { AuroraText } from './components/AuroraText'
 import { ThemeToggler } from './components/ThemeToggler'
 import { StripedPattern } from './components/StripedPattern'
-import { DocsLayout } from './components/DocsLayout'
-import { Playground } from './components/Playground'
+const DocsLayout = lazy(() => import('./components/DocsLayout').then(m => ({ default: m.DocsLayout })))
+const Playground = lazy(() => import('./components/Playground').then(m => ({ default: m.Playground })))
 
 const LIGHT = {
   bg: '#ffffff',
@@ -31,8 +31,8 @@ const LIGHT = {
   accentBorder: 'rgba(0, 0, 0, 0.12)',
   accentBorderHover: 'rgba(0, 0, 0, 0.3)',
   success: '#16a34a',
-  mono: "'JetBrains Mono', monospace",
-  sans: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  mono: "'JetBrains Mono Variable', monospace",
+  sans: "'Inter Variable', -apple-system, BlinkMacSystemFont, sans-serif",
   radius: 12,
   navBg: 'rgba(255, 255, 255, 0.85)',
   navBgFaded: 'rgba(255, 255, 255, 0.5)',
@@ -67,8 +67,8 @@ const DARK = {
   accentBorder: 'rgba(255, 255, 255, 0.1)',
   accentBorderHover: 'rgba(255, 255, 255, 0.25)',
   success: '#4ade80',
-  mono: "'JetBrains Mono', monospace",
-  sans: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  mono: "'JetBrains Mono Variable', monospace",
+  sans: "'Inter Variable', -apple-system, BlinkMacSystemFont, sans-serif",
   radius: 12,
   navBg: 'rgba(6, 6, 10, 0.85)',
   navBgFaded: 'rgba(6, 6, 10, 0.5)',
@@ -2326,8 +2326,8 @@ export default function App() {
           <CTASection />
           <Footer />
         </>} />
-        <Route path="/docs/*" element={<DocsLayout />} />
-        <Route path="/playground" element={<Playground />} />
+        <Route path="/docs/*" element={<Suspense fallback={null}><DocsLayout /></Suspense>} />
+        <Route path="/playground" element={<Suspense fallback={null}><Playground /></Suspense>} />
       </Routes>
     </>
   )
