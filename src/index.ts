@@ -15,9 +15,11 @@ export { ParseError } from './types/error.js';
 export { formatFailure, formatTree } from './diagnostics/formatter.js';
 export { FindMatch, find } from './executor/executor.js';
 export { compile, fastMatch, CompiledProgram } from './executor/fast.js';
-export { LineMatch, SearchError, SearchResult, SearchOptions, StreamSearchOptions, searchString, searchFile, searchFolder, searchStream, searchFileStream, formatSearchResults } from './search/search.js';
+export { LineMatch, SearchError, SearchResult, SearchOptions, StreamSearchOptions, searchString, searchFile, searchFolder, searchFolderStream, searchStream, searchFileStream, formatSearchResults } from './search/search.js';
 
 // @api-parse
+// Compiles the grammar into an AST and attaches a bytecode CompiledProgram
+// (used by the fast paths as an optimistic pre-check before the tree executor).
 export function parse(source: string): MatchProgram {
   const tokens = lex(source);
   const program = parseTokens(tokens);
@@ -30,6 +32,14 @@ export function parse(source: string): MatchProgram {
 const encoder = new TextEncoder();
 
 // @api-match
+// Execution tier selection:
+//   1. If a CompiledProgram exists, run the fast path (wasmFastMatch) as a pre-check.
+//      wasmFastMatch picks WASM for inputs >= 40 bytes, JS fast path otherwise.
+//   2. If the fast path confirms full-input success, run the tree executor with
+//      skipFailureTracking=true (faster — no expected-set or rule-stack recording).
+//   3. If the fast path reports failure (or no compiled program), run the tree
+//      executor with full failure tracking for detailed diagnostics.
+// The tree executor always runs — it's the only path that produces parse trees.
 export function match(program: MatchProgram, input: string): MatchResult {
   const cp: CompiledProgram | undefined = (program as any).__compiled;
   if (cp) {

@@ -96,6 +96,10 @@ function getTextBlockBytes(node: { text: string }): Uint8Array {
 }
 
 // @match-engine
+// Tree executor: the only execution path that produces full parse trees and
+// structured error diagnostics. Always runs for match()/run() calls.
+// When skipFailureTracking is true (fast path confirmed success), the engine
+// skips recording expected-sets and rule stacks, making execution faster.
 export function execute(program: MatchProgram, input: string, skipFailureTracking?: boolean): MatchResult {
   const inputBytes = stringToBytes(input);
   const engine = new Engine(program, inputBytes, skipFailureTracking);

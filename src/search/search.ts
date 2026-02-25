@@ -243,6 +243,71 @@ function walkDir(
   }
 }
 
+async function* walkDirAsync(
+  dir: string,
+  seen: Set<string>
+): AsyncGenerator<string> {
+  let realDir: string;
+  try {
+    realDir = await fs.promises.realpath(dir);
+  } catch {
+    return;
+  }
+
+  if (seen.has(realDir)) return;
+  seen.add(realDir);
+
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+
+      if (entry.isSymbolicLink()) {
+        try {
+          const stat = await fs.promises.stat(fullPath);
+          if (!stat.isDirectory()) continue;
+        } catch {
+          continue;
+        }
+      }
+
+      yield* walkDirAsync(fullPath, seen);
+    } else if (entry.isFile()) {
+      yield fullPath;
+    }
+  }
+}
+
+// @search-folder-stream
+export async function* searchFolderStream(
+  program: MatchProgram,
+  folderPath: string,
+  options: SearchOptions = {}
+): AsyncGenerator<LineMatch | SearchError> {
+  const resolved = path.resolve(folderPath);
+
+  for await (const filePath of walkDirAsync(resolved, new Set())) {
+    if (options.glob && !matchesGlob(filePath, options.glob)) continue;
+
+    try {
+      for await (const match of searchFileStream(program, filePath, options)) {
+        yield match;
+      }
+    } catch (e: any) {
+      yield { file: filePath, error: e.message || String(e) } as SearchError;
+    }
+  }
+}
+// @search-folder-stream-end
+
 export function formatSearchResults(
   results: LineMatch[],
   options: { color?: boolean } = {}

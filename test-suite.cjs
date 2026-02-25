@@ -2342,6 +2342,113 @@ test('searchFileStream: reads file line by line', async () => {
   }
 });
 
+test('searchFolderStream: yields matches across files', async () => {
+  const { parse: p } = require('./dist/cjs/index.js');
+  const { searchFolderStream } = require('./dist/cjs/search/search.js');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'match-sfs-'));
+  fs.writeFileSync(path.join(tmpDir, 'a.txt'), 'hello 123\nworld\n');
+  fs.writeFileSync(path.join(tmpDir, 'b.txt'), 'foo 456\nbar 789\n');
+
+  try {
+    const program = p('main: one or more digits');
+    const results = [];
+    for await (const item of searchFolderStream(program, tmpDir)) {
+      results.push(item);
+    }
+    assert(results.length === 3, `Expected 3 matches, got ${results.length}`);
+    assert(results.every(r => 'matches' in r), 'All results should be LineMatch');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true });
+  }
+});
+
+test('searchFolderStream: glob filtering', async () => {
+  const { parse: p } = require('./dist/cjs/index.js');
+  const { searchFolderStream } = require('./dist/cjs/search/search.js');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'match-sfs-glob-'));
+  fs.writeFileSync(path.join(tmpDir, 'a.txt'), 'hello 123\n');
+  fs.writeFileSync(path.join(tmpDir, 'b.log'), 'world 456\n');
+
+  try {
+    const program = p('main: one or more digits');
+    const results = [];
+    for await (const item of searchFolderStream(program, tmpDir, { glob: '*.log' })) {
+      results.push(item);
+    }
+    assert(results.length === 1, `Expected 1 match, got ${results.length}`);
+    assert(results[0].content.includes('456'), 'Should match from .log file only');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true });
+  }
+});
+
+test('searchFolderStream: skips hidden and excluded dirs', async () => {
+  const { parse: p } = require('./dist/cjs/index.js');
+  const { searchFolderStream } = require('./dist/cjs/search/search.js');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'match-sfs-skip-'));
+  fs.mkdirSync(path.join(tmpDir, '.hidden'));
+  fs.writeFileSync(path.join(tmpDir, '.hidden', 'a.txt'), 'secret 111\n');
+  fs.mkdirSync(path.join(tmpDir, 'node_modules'));
+  fs.writeFileSync(path.join(tmpDir, 'node_modules', 'b.txt'), 'dep 222\n');
+  fs.writeFileSync(path.join(tmpDir, 'c.txt'), 'visible 333\n');
+
+  try {
+    const program = p('main: one or more digits');
+    const results = [];
+    for await (const item of searchFolderStream(program, tmpDir)) {
+      results.push(item);
+    }
+    assert(results.length === 1, `Expected 1 match, got ${results.length}`);
+    assert(results[0].content.includes('333'), 'Should only find visible file');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true });
+  }
+});
+
+test('searchFolderStream: recurses into subdirectories', async () => {
+  const { parse: p } = require('./dist/cjs/index.js');
+  const { searchFolderStream } = require('./dist/cjs/search/search.js');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'match-sfs-recurse-'));
+  fs.writeFileSync(path.join(tmpDir, 'top.txt'), 'num 100\n');
+  fs.mkdirSync(path.join(tmpDir, 'sub'));
+  fs.writeFileSync(path.join(tmpDir, 'sub', 'deep.txt'), 'num 200\n');
+
+  try {
+    const program = p('main: one or more digits');
+    const results = [];
+    for await (const item of searchFolderStream(program, tmpDir)) {
+      results.push(item);
+    }
+    assert(results.length === 2, `Expected 2 matches, got ${results.length}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true });
+  }
+});
+
+test('searchFolderStream: skips binary files', async () => {
+  const { parse: p } = require('./dist/cjs/index.js');
+  const { searchFolderStream } = require('./dist/cjs/search/search.js');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'match-sfs-bin-'));
+  fs.writeFileSync(path.join(tmpDir, 'text.txt'), 'num 123\n');
+  fs.writeFileSync(path.join(tmpDir, 'bin.dat'), Buffer.from([0x00, 0x01, 0x02, 0x31, 0x32, 0x33]));
+
+  try {
+    const program = p('main: one or more digits');
+    const results = [];
+    for await (const item of searchFolderStream(program, tmpDir)) {
+      results.push(item);
+    }
+    assert(results.length === 1, `Expected 1 match, got ${results.length}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true });
+  }
+});
+
 // ============================================================
 // Report
 // ============================================================

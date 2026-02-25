@@ -129,8 +129,8 @@ interface ChatMessage {
 }
 
 function AIChat({ onApplyGrammar }: { onApplyGrammar: (grammar: string) => void }) {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('match-ai-key') || '')
-  const [provider, setProvider] = useState<'anthropic' | 'openai'>(() => (localStorage.getItem('match-ai-provider') as any) || 'anthropic')
+  const [apiKey, setApiKey] = useState(() => sessionStorage.getItem('match-ai-key') || '')
+  const [provider, setProvider] = useState<'anthropic' | 'openai'>(() => (sessionStorage.getItem('match-ai-provider') as any) || 'anthropic')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -145,8 +145,8 @@ function AIChat({ onApplyGrammar }: { onApplyGrammar: (grammar: string) => void 
   const saveKey = (key: string, prov: 'anthropic' | 'openai') => {
     setApiKey(key)
     setProvider(prov)
-    localStorage.setItem('match-ai-key', key)
-    localStorage.setItem('match-ai-provider', prov)
+    sessionStorage.setItem('match-ai-key', key)
+    sessionStorage.setItem('match-ai-provider', prov)
     setShowKeyInput(false)
   }
 
@@ -269,7 +269,7 @@ function AIChat({ onApplyGrammar }: { onApplyGrammar: (grammar: string) => void 
           </button>
         </div>
         <div style={{ fontSize: 10, color: 'var(--t-text-muted)', textAlign: 'center', fontFamily: 'var(--t-mono)', maxWidth: 240, opacity: 0.5 }}>
-          Your key stays in your browser and goes straight to the provider. We never store, log, or see it.
+          Your key stays in this tab only and goes straight to the provider. We never store, log, or see it. Cleared when you close the tab.
         </div>
       </div>
     )
@@ -339,7 +339,8 @@ function AIChat({ onApplyGrammar }: { onApplyGrammar: (grammar: string) => void 
         <textarea
           ref={inputRef}
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={e => setInput(e.target.value.slice(0, 2000))}
+          maxLength={2000}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
           }}

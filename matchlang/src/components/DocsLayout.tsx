@@ -48,6 +48,7 @@ const SECTIONS: DocSection[] = [
       { title: 'Search', slug: 'search' },
       { title: 'Diagnostics', slug: 'diagnostics' },
       { title: 'Types', slug: 'types' },
+      { title: 'Performance', slug: 'performance' },
       { title: 'Dynamic Grammars', slug: 'dynamic-grammars' },
     ],
   },
@@ -641,7 +642,7 @@ function SequencesDoc() {
       <H2>Alternation with <Code>or</Code></H2>
       <P><Code>or</Code> tries each option in order. The first match wins (PEG ordered choice):</P>
       <Pre label="grammar">{`value: token or quoted value`}</Pre>
-      <P>This is not ambiguous backtracking. Once an option matches, the others are never tried. If the first option fails, the second is tried at the same position.</P>
+      <P>Once an option matches, the others are never tried. If the first option fails, the second is tried at the same position.</P>
 
       <H2>Order matters</H2>
       <P>If you're coming from regex, this is the biggest gotcha. Regex alternation (<Code>|</Code>) finds the longest match. Match's <Code>or</Code> takes the first option that succeeds, even if a later option would match more:</P>
@@ -1131,6 +1132,48 @@ function TypesDoc() {
   )
 }
 
+function PerformanceDoc() {
+  return (
+    <DocPage>
+      <H1>Performance</H1>
+      <Pre label="typescript">{`compile(program: MatchProgram): CompiledProgram
+fastMatch(cp: CompiledProgram, input: Uint8Array): number`}</Pre>
+      <P>Low-level fast path for boolean matching. <Code>compile</Code> converts a parsed grammar into a bytecode-like representation. <Code>fastMatch</Code> runs it against raw bytes, returning the number of bytes consumed on success or <Code>-1</Code> on failure.</P>
+      <Pre label="app.ts">{`import { parse, compile, fastMatch } from '@hollowsolve/match'
+
+const program = parse('main: one or more digits')
+const cp = compile(program)
+const encoder = new TextEncoder()
+
+fastMatch(cp, encoder.encode('12345'))  // 5 (consumed all bytes)
+fastMatch(cp, encoder.encode('abc'))    // -1 (failure)`}</Pre>
+
+      <H2>Execution tiers</H2>
+      <P>Three tiers are chosen automatically based on context:</P>
+      <Pre label="tiers">{`JS fast path    — inputs < 40 bytes, or WASM unavailable
+WASM fast path  — inputs ≥ 40 bytes in Node.js
+Tree executor   — always used by match()/run() for full results`}</Pre>
+      <P><Code>match()</Code> and <Code>run()</Code> use the fast path internally as a pre-check. When the fast path confirms success, the tree executor skips failure tracking — avoiding Set allocations and array copies on every backtracking branch.</P>
+
+      <H2>When to use directly</H2>
+      <P>Use <Code>compile</Code> + <Code>fastMatch</Code> when you only need pass/fail and don't need parse trees, extracted nodes, or failure diagnostics. This is useful for filtering, validation gates, or high-throughput scanning where you'll only build the full result for matches that pass.</P>
+      <Pre label="app.ts">{`import { parse, match, compile, fastMatch } from '@hollowsolve/match'
+
+const program = parse(grammar)
+const cp = compile(program)
+const encoder = new TextEncoder()
+
+for (const line of lines) {
+  // fast reject — skip lines that don't match
+  if (fastMatch(cp, encoder.encode(line)) === -1) continue
+  // full parse only for matches
+  const result = match(program, line)
+  // ... use result.tree
+}`}</Pre>
+    </DocPage>
+  )
+}
+
 function DynamicGrammarsDoc() {
   return (
     <DocPage>
@@ -1280,7 +1323,7 @@ function RFC7239Example() {
   return (
     <DocPage>
       <H1>RFC 7239 Forwarded</H1>
-      <P>A complete parser for the HTTP Forwarded header per <a href="https://www.rfc-editor.org/rfc/rfc7239" target="_blank" rel="noopener" style={{ textDecoration: 'underline', textUnderlineOffset: 3 }}>RFC 7239</a>:</P>
+      <P>A complete parser for the HTTP Forwarded header per <a href="https://www.rfc-editor.org/rfc/rfc7239" target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'underline', textUnderlineOffset: 3 }}>RFC 7239</a>:</P>
       <Pre label="grammar">{`token char:
   any of (
     exclamation, hash, dollar, percent, ampersand,
@@ -1437,6 +1480,7 @@ export function DocsLayout() {
         <Route path="api/search" element={<SearchDoc />} />
         <Route path="api/diagnostics" element={<DiagnosticsDoc />} />
         <Route path="api/types" element={<TypesDoc />} />
+        <Route path="api/performance" element={<PerformanceDoc />} />
         <Route path="api/dynamic-grammars" element={<DynamicGrammarsDoc />} />
         <Route path="examples/key-value" element={<KeyValueExample />} />
         <Route path="examples/csv" element={<CSVExample />} />

@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { motion } from 'framer-motion'
 
 interface ThemeTogglerProps {
@@ -7,6 +8,14 @@ interface ThemeTogglerProps {
 }
 
 export function ThemeToggler({ isDark, onToggle, size = 20 }: ThemeTogglerProps) {
+  const rotationRef = useRef(isDark ? 0 : -180)
+  const prevDarkRef = useRef(isDark)
+
+  if (isDark !== prevDarkRef.current) {
+    rotationRef.current -= 180
+    prevDarkRef.current = isDark
+  }
+
   return (
     <button
       onClick={onToggle}
@@ -31,7 +40,7 @@ export function ThemeToggler({ isDark, onToggle, size = 20 }: ThemeTogglerProps)
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
-        animate={{ rotate: isDark ? 0 : 180 }}
+        animate={{ rotate: rotationRef.current }}
         transition={{ duration: 0.5, ease: 'easeInOut' }}
       >
         <motion.circle

@@ -143,7 +143,7 @@ function Nav({ isDark, onToggle, onSearch }: { isDark: boolean; onToggle: () => 
         textDecoration: 'none',
         display: 'flex', alignItems: 'center', gap: 8,
       }}>
-        <img src="/matchlogo.png" alt="" style={{ height: 22, filter: T.logoFilter, transform: 'rotate(90deg)' }} />
+        <img src="/matchlogo.png" alt="" style={{ height: 32, filter: T.logoFilter, transform: 'rotate(90deg)' }} />
         match
       </Link>
       <div style={{ flex: 1 }} />
@@ -341,7 +341,7 @@ function Hero() {
             }}
           >
             A pattern matching language that replaces regular expressions.
-            No backtracking. No ReDoS. Ever.
+            Full parse trees, no ReDoS.
           </motion.p>
 
           <motion.div
@@ -611,9 +611,9 @@ function Features() {
       accent: T.text,
     },
     {
-      keyword: 'Linear',
-      desc: 'PEG semantics. No backtracking. ReDoS is structurally impossible.',
-      code: `-- Regex: (a+)+$ on "aaaaX" → catastrophic\n-- Match: ordered choice, never revisits`,
+      keyword: 'Predictable',
+      desc: 'PEG ordered choice. First match wins. No ambiguity, no surprises.',
+      code: `-- Regex: (a+)+$ on "aaaaX" → catastrophic\n-- Match: ordered choice, linear per alternative`,
       accent: T.text,
     },
     {
@@ -925,9 +925,9 @@ function Metrics() {
         }}>
           {[
             { value: 333, label: 'Tests passing', suffix: '' },
-            { value: 0, label: 'Backtracking bugs', suffix: '', prefix: '' },
+            { value: 0, label: 'Dependencies', suffix: '', prefix: '' },
             { value: 100, label: 'Coverage', suffix: '%' },
-            { value: 0, label: 'Dependencies', suffix: '' },
+            { value: 1, label: 'npm install', suffix: '', prefix: '' },
           ].map((m, i) => (
             <div key={m.label} style={{
               padding: '40px 24px',
@@ -937,7 +937,7 @@ function Metrics() {
               <div style={{
                 fontSize: 'clamp(32px, 4vw, 48px)',
                 fontWeight: 700,
-                color: i === 1 || i === 3 ? T.success : T.text,
+                color: T.text,
                 letterSpacing: '-0.03em',
                 fontFamily: T.mono,
               }}>
@@ -1407,7 +1407,7 @@ function PersonalCard() {
             transform: activated ? 'translateY(0)' : 'translateY(100%)',
             opacity: activated ? 1 : 0,
             textAlign: activated ? 'center' : 'left',
-          }}>Thank you</span>
+          }}>Thanks!</span>
         </div>
         <div style={{
           color: T.textMuted, fontSize: 13, marginBottom: 32, fontFamily: T.mono,
@@ -1427,7 +1427,7 @@ function PersonalCard() {
             transform: activated ? 'translateY(0)' : 'translateY(100%)',
             opacity: activated ? 1 : 0,
             textAlign: activated ? 'center' : 'left',
-          }}>This means a lot.</span>
+          }}>enjoy your purchase :)</span>
         </div>
         <ul style={{
           textAlign: 'left', listStyle: 'none', padding: 0, margin: '0 0 32px',
@@ -1737,7 +1737,7 @@ function CTASection() {
           </p>
 
           <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
-            <a href={CONFIG.github.repoUrl} target="_blank" rel="noopener" style={{
+            <a href={CONFIG.github.repoUrl} target="_blank" rel="noopener noreferrer" style={{
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               padding: '14px 32px',
               background: 'transparent',
@@ -1781,12 +1781,12 @@ function Footer() {
           WebkitTextFillColor: 'transparent',
           transition: 'all 0.4s ease',
         }}>
-          match
+          match by <a href="https://hollowsolve.com" target="_blank" rel="noopener noreferrer" style={{ WebkitTextFillColor: T.accent, textDecoration: 'underline', textUnderlineOffset: 3, textDecorationColor: 'transparent', transition: 'text-decoration-color 0.2s' }} onMouseEnter={e => e.currentTarget.style.textDecorationColor = T.accent} onMouseLeave={e => e.currentTarget.style.textDecorationColor = 'transparent'}>hollowsolve</a>
         </span>
         <div style={{ display: 'flex', gap: 24 }}>
-          <a href={CONFIG.github.repoUrl} className="nav-link" target="_blank" rel="noopener">GitHub</a>
-          <a href={CONFIG.discord.inviteUrl} className="nav-link" target="_blank" rel="noopener">Discord</a>
-          <a href={`https://www.npmjs.com/package/${CONFIG.npm.packageName}`} className="nav-link" target="_blank" rel="noopener">npm</a>
+          <a href={CONFIG.github.repoUrl} className="nav-link" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href={CONFIG.discord.inviteUrl} className="nav-link" target="_blank" rel="noopener noreferrer">Discord</a>
+          <a href={`https://www.npmjs.com/package/${CONFIG.npm.packageName}`} className="nav-link" target="_blank" rel="noopener noreferrer">npm</a>
         </div>
       </div>
     </footer>

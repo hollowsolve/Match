@@ -405,6 +405,47 @@ param [0..9]
 └── token [4..9] "value"
 ```
 
+### Performance
+
+```ts
+compile(program: MatchProgram): CompiledProgram
+fastMatch(cp: CompiledProgram, input: Uint8Array): number
+```
+
+Low-level fast path for boolean matching. `compile` converts a parsed grammar into a bytecode-like representation. `fastMatch` runs it against raw bytes, returning the number of bytes consumed on success or `-1` on failure.
+
+```ts
+import { parse, compile, fastMatch } from '@hollowsolve/match'
+
+const program = parse('main: one or more digits')
+const cp = compile(program)
+const encoder = new TextEncoder()
+
+fastMatch(cp, encoder.encode('12345'))  // 5 (success — consumed all 5 bytes)
+fastMatch(cp, encoder.encode('abc'))    // -1 (failure)
+```
+
+Three execution tiers work together automatically:
+
+| Tier | When | Speed |
+|------|------|-------|
+| **JS fast path** | Inputs < 40 bytes, or WASM unavailable | ~2-5× faster than tree executor |
+| **WASM fast path** | Inputs ≥ 40 bytes in Node.js | ~5-10× faster than tree executor |
+| **Tree executor** | Always used for `match()`/`run()` results | Baseline — produces full parse trees |
+
+**How they interrelate:**
+
+The fast paths (JS and WASM) don't replace the tree executor — they act as **optimistic pre-checks**. When you call `match()` or `run()`:
+
+1. `parse()` compiles the grammar into an AST *and* a bytecode `CompiledProgram`, attached to the program object
+2. `match()` runs the fast path first (`wasmFastMatch`), which picks WASM for inputs ≥ 40 bytes or falls back to the JS fast path for smaller inputs / when WASM is unavailable
+3. If the fast path confirms success (bytes consumed == input length), the tree executor runs with failure tracking disabled — this is faster because it skips recording expected-sets and rule stacks
+4. If the fast path reports failure, the tree executor runs with full failure tracking to produce detailed diagnostics
+
+The tree executor always runs — it's the only path that produces parse trees and structured errors. The fast paths just tell it whether to bother tracking failure context.
+
+Use `compile` + `fastMatch` directly when you only need pass/fail and don't need parse trees — this skips the tree executor entirely.
+
 ### Partial parsing
 
 ```ts

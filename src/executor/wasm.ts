@@ -52,6 +52,12 @@ function ensureState(wasm: WasmExports, cp: CompiledProgram): WasmProgramState |
   return state;
 }
 
+// Optimistic pre-check entry point. Selects between WASM and JS fast path:
+//   - Inputs < 40 bytes → JS fast path (WASM overhead not worth it)
+//   - Inputs >= 40 bytes → WASM if available, JS fast path as fallback
+// Returns bytes consumed on success, -1 on failure.
+// The result is used by match() to decide whether the tree executor can
+// skip failure tracking (success) or needs full diagnostics (failure).
 export function wasmFastMatch(cp: CompiledProgram, input: Uint8Array): number {
   if (input.length < 40) return jsFastMatch(cp, input);
   const wasm = loadWasmSync();
