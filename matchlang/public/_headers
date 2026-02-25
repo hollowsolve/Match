@@ -10,3 +10,6 @@
   Cross-Origin-Embedder-Policy: credentialless
   Cross-Origin-Resource-Policy: same-origin
   X-Robots-Tag: index, follow
+
+/og-image.png
+  Cross-Origin-Resource-Policy: cross-origin
