@@ -971,40 +971,211 @@ function Metrics() {
 }
 
 function Compare() {
-  const [scrolledToBottom, setScrolledToBottom] = useState(false)
-  const regexScrollRef = useRef<HTMLDivElement>(null)
+  const comparisons = [
+    {
+      label: 'Email address',
+      regex: [
+        "(?:                                  # local part",
+        "  [a-z0-9!#$%&'*+/=?^_`{|}~-]+      #   atom",
+        "  (?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)* #   dot-atom",
+        "|                                    # or",
+        '  "(?:                               #   quoted string',
+        "    [\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f     #     qtext",
+        "     \\x21\\x23-\\x5b\\x5d-\\x7f]",
+        "  | \\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f] #     quoted-pair",
+        '  )*"',
+        ")",
+        "@ (?:                                # domain",
+        "  (?:[a-z0-9]                        #   label",
+        "     (?:[a-z0-9-]*[a-z0-9])?\\.       #   dot",
+        "  )+ [a-z0-9](?:[a-z0-9-]*[a-z0-9])?#   TLD",
+        "|                                    # or",
+        "  \\[(?:                              #   IP literal",
+        "    (?:25[0-5]|2[0-4][0-9]           #     250-255 / 200-249",
+        "      |[01]?[0-9][0-9]?)\\.           #     0-199",
+        "  ){3}",
+        "  (?:25[0-5]|2[0-4][0-9]            #     last octet",
+        "    |[01]?[0-9][0-9]?",
+        "    |[a-z0-9-]*[a-z0-9]:            #     general addr",
+        "      (?:[\\x01-\\x08\\x0b\\x0c",
+        "          \\x0e-\\x1f\\x21-\\x5a",
+        "          \\x53-\\x7f]",
+        "       |\\\\[\\x01-\\x09\\x0b\\x0c",
+        "           \\x0e-\\x7f])+",
+        "  )\\]",
+        ")",
+      ].join("\n"),
+      match: `atext: any of (letter, digit, exclamation, hash, dollar, percent, ampersand, single quote, asterisk, plus, slash, equals, question, caret, underscore, backtick, open brace, pipe, close brace, tilde, hyphen)
+dotted: one or more atext joined by period
+qtext: any of (printable except (double quote, backslash), space, tab)
+qpair: backslash then printable
+quoted: double quote then zero or more (qtext or qpair) then double quote
+local: dotted or quoted
+label: one or more of (letter, digit, hyphen)
+hostname: label joined by period
+octet: between 1 and 3 digits
+addr: octet joined by period
+ip literal: open bracket then addr then close bracket
+domain: hostname or ip literal
+email: local then at then domain`,
+    },
+    {
+      label: 'URL path',
+      regex: [
+        "^\\/                                 # starts with /",
+        "(?:                                  # path segment",
+        "  [a-zA-Z0-9\\-._~!$&'()*+,;=:@]    #   unreserved / sub-delims",
+        "| %[0-9A-Fa-f]{2}                    #   percent-encoded",
+        ")+                                   # one or more chars",
+        "(?:                                  # additional segments",
+        "  \\/                                 #   slash separator",
+        "  (?:                                 #   segment chars",
+        "    [a-zA-Z0-9\\-._~!$&'()*+,;=:@]   #     unreserved",
+        "  | %[0-9A-Fa-f]{2}                   #     percent-encoded",
+        "  )*                                  #   zero or more",
+        ")*$                                  # repeat segments",
+      ].join("\n"),
+      match: `pchar: letter or digit or "-" or "." or "_" or "~"
+encoded: "%" then 2 hex digits
+segment: one or more (pchar or encoded)
+path: "/" then (segment joined by "/")`,
+    },
+    {
+      label: 'Log line',
+      regex: [
+        "^\\[                                  # opening bracket",
+        "(                                    # capture timestamp",
+        "  \\d{4}-\\d{2}-\\d{2}                 #   date YYYY-MM-DD",
+        "  T                                  #   separator",
+        "  \\d{2}:\\d{2}:\\d{2}                 #   time HH:MM:SS",
+        "  \\.\\d{3}Z                           #   millis + Z",
+        ")                                    # end timestamp",
+        "\\]\\s+                                # close bracket, space",
+        "(INFO|WARN|ERROR|DEBUG)               # capture level",
+        "\\s+\\[                                # space, open bracket",
+        "([^\\]]+)                              # capture source",
+        "\\]\\s+                                # close bracket, space",
+        "(.+)$                                # capture message",
+      ].join("\n"),
+      match: `timestamp: 4 digits then "-" then 2 digits then "-" then 2 digits then "T" then 2 digits then ":" then 2 digits then ":" then 2 digits then "." then 3 digits then "Z"
+level: "INFO" or "WARN" or "ERROR" or "DEBUG"
+source: one or more characters except ("]")
+message: one or more any characters
+log: "[" then extract timestamp then "] " then extract level then " [" then extract source then "] " then extract message`,
+    },
+    {
+      label: 'Semantic version',
+      regex: [
+        "^(0|[1-9]\\d*)                        # major",
+        "\\.(0|[1-9]\\d*)                      # minor",
+        "\\.(0|[1-9]\\d*)                      # patch",
+        "(?:-                                 # pre-release",
+        "  (                                  #   capture",
+        "    (?:0|[1-9]\\d*                    #     numeric id",
+        "      |\\d*[a-zA-Z-][0-9a-zA-Z-]*)    #     alphanumeric id",
+        "    (?:\\.                             #     dot separator",
+        "      (?:0|[1-9]\\d*                  #       numeric",
+        "        |\\d*[a-zA-Z-][0-9a-zA-Z-]*)  #       alphanumeric",
+        "    )*                                #     more identifiers",
+        "  )                                  #   end capture",
+        ")?                                   # pre-release optional",
+        "(?:\\+                                # build metadata",
+        "  ([0-9a-zA-Z-]+                     #   capture",
+        "    (?:\\.[0-9a-zA-Z-]+)*)            #   dot-separated",
+        ")?$                                  # build optional",
+      ].join("\n"),
+      match: `num: one or more digits
+pre tag: one or more of (letter, digit, hyphen)
+pre: pre tag joined by "."
+build: one or more of (letter, digit, hyphen) joined by "."
+semver: num then "." then num then "." then num then optional ("-" then pre) then optional ("+" then build)`,
+    },
+    {
+      label: 'CSV row',
+      regex: [
+        "(?:^|,)                              # start or comma",
+        "(?:                                  # field",
+        '  "                                  #   open quote',
+        "  (                                  #   capture quoted",
+        '    [^"]*                             #     non-quote chars',
+        '    (?:""                             #     escaped quote',
+        '      [^"]*                           #     more chars',
+        "    )*                                #     repeat",
+        "  )                                  #   end capture",
+        '  "                                  #   close quote',
+        "|                                    # or",
+        '  ([^",\\r\\n]*)                      #   unquoted field',
+        ")",
+      ].join("\n"),
+      match: `escaped: double quote then double quote
+inner: one or more characters except (double quote)
+quoted: double quote then zero or more (inner or escaped) then double quote
+plain: zero or more characters except (comma, double quote, newline)
+field: quoted or plain
+row: field joined by comma`,
+    },
+  ]
 
-  const regexExpanded = [
-    "(?:                                  # local part",
-    "  [a-z0-9!#$%&'*+/=?^_`{|}~-]+      #   atom",
-    "  (?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)* #   dot-atom",
-    "|                                    # or",
-    '  "(?:                               #   quoted string',
-    "    [\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f     #     qtext",
-    "     \\x21\\x23-\\x5b\\x5d-\\x7f]",
-    "  | \\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f] #     quoted-pair",
-    '  )*"',
-    ")",
-    "@ (?:                                # domain",
-    "  (?:[a-z0-9]                        #   label",
-    "     (?:[a-z0-9-]*[a-z0-9])?\\.       #   dot",
-    "  )+ [a-z0-9](?:[a-z0-9-]*[a-z0-9])?#   TLD",
-    "|                                    # or",
-    "  \\[(?:                              #   IP literal",
-    "    (?:25[0-5]|2[0-4][0-9]           #     250-255 / 200-249",
-    "      |[01]?[0-9][0-9]?)\\.           #     0-199",
-    "  ){3}",
-    "  (?:25[0-5]|2[0-4][0-9]            #     last octet",
-    "    |[01]?[0-9][0-9]?",
-    "    |[a-z0-9-]*[a-z0-9]:            #     general addr",
-    "      (?:[\\x01-\\x08\\x0b\\x0c",
-    "          \\x0e-\\x1f\\x21-\\x5a",
-    "          \\x53-\\x7f]",
-    "       |\\\\[\\x01-\\x09\\x0b\\x0c",
-    "           \\x0e-\\x7f])+",
-    "  )\\]",
-    ")",
-  ].join("\n")
+  const [active, setActive] = useState(0)
+  const [progress, setProgress] = useState(0)
+  const [inView, setInView] = useState(false)
+  const [paused, setPaused] = useState(false)
+  const [navTick, setNavTick] = useState(0)
+  const savedProgress = useRef(0)
+  const sectionRef = useRef<HTMLDivElement>(null)
+  const regexScrollRef = useRef<HTMLDivElement>(null)
+  const [scrolledToBottom, setScrolledToBottom] = useState(false)
+  const [overflows, setOverflows] = useState(false)
+  const CYCLE_MS = 8000
+
+  useEffect(() => {
+    const el = sectionRef.current
+    if (!el) return
+    const obs = new IntersectionObserver(([e]) => setInView(e.isIntersecting), { threshold: 0.2 })
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!inView || paused) return
+    const start = Date.now()
+    const baseIdx = active
+    const baseOffset = savedProgress.current * CYCLE_MS
+    let raf: number
+    const tick = () => {
+      const elapsed = Date.now() - start + baseOffset
+      const cycle = elapsed % (CYCLE_MS * comparisons.length)
+      const idx = (baseIdx + Math.floor(cycle / CYCLE_MS)) % comparisons.length
+      const pct = (cycle % CYCLE_MS) / CYCLE_MS
+      setActive(idx)
+      setProgress(pct)
+      savedProgress.current = pct
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [inView, comparisons.length, paused, navTick])
+
+  const manualNav = (idx: number) => {
+    setActive(idx)
+    setProgress(0)
+    savedProgress.current = 0
+    setNavTick(t => t + 1)
+  }
+
+  const goPrev = () => manualNav((active - 1 + comparisons.length) % comparisons.length)
+  const goNext = () => manualNav((active + 1) % comparisons.length)
+
+  useEffect(() => {
+    setScrolledToBottom(false)
+    if (regexScrollRef.current) {
+      regexScrollRef.current.scrollTop = 0
+      requestAnimationFrame(() => {
+        const el = regexScrollRef.current
+        if (el) setOverflows(el.scrollHeight > el.clientHeight)
+      })
+    }
+  }, [active])
 
   const handleRegexScroll = () => {
     const el = regexScrollRef.current
@@ -1012,8 +1183,10 @@ function Compare() {
     setScrolledToBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 4)
   }
 
+  const c = comparisons[active]
+
   return (
-    <section id="compare" style={{ padding: '128px 24px', maxWidth: 1400, margin: '0 auto' }}>
+    <section ref={sectionRef} id="compare" style={{ padding: '128px 24px', maxWidth: 1400, margin: '0 auto' }}>
       <FadeIn>
         <p style={{
           textAlign: 'center', fontSize: 12, fontFamily: T.mono,
@@ -1024,7 +1197,17 @@ function Compare() {
         </p>
         <h2 className="section-heading">Same parser.<br />Only one is readable.</h2>
         <p style={{ textAlign: 'center', color: T.textSecondary, fontSize: 15, marginTop: 16, marginBottom: 48 }}>
-          Validate an email address — side by side.
+          <AnimatePresence mode="wait">
+            <motion.span
+              key={active}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              {c.label} — side by side.
+            </motion.span>
+          </AnimatePresence>
         </p>
       </FadeIn>
 
@@ -1033,6 +1216,7 @@ function Compare() {
           display: 'grid', gridTemplateColumns: '1fr 1fr',
           gap: 1, maxWidth: 1200, margin: '0 auto',
           background: T.border, borderRadius: T.radius, overflow: 'hidden',
+          minHeight: 424,
         }}>
           <div style={{ background: T.bg, padding: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{
@@ -1048,17 +1232,26 @@ function Compare() {
                 onScroll={handleRegexScroll}
                 style={{
                   overflowY: 'auto',
-                  maxHeight: 420,
+                  maxHeight: 384,
                 }}
               >
-                <pre style={{
-                  padding: 20, margin: 0,
-                  fontSize: 12.5, fontFamily: T.mono,
-                  color: T.textSecondary,
-                  lineHeight: 1.8,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                }}>{regexExpanded}</pre>
+                <AnimatePresence initial={false} mode="popLayout">
+                  <motion.pre
+                    key={active}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0, position: 'absolute', top: 0, left: 0, right: 0 }}
+                    transition={{ duration: 0.25 }}
+                    style={{
+                      padding: 20, margin: 0,
+                      fontSize: 12.5, fontFamily: T.mono,
+                      color: T.textSecondary,
+                      lineHeight: 1.8,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                    }}
+                  >{c.regex}</motion.pre>
+                </AnimatePresence>
               </div>
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -1067,7 +1260,7 @@ function Compare() {
                 display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
                 paddingBottom: 12,
                 pointerEvents: 'none',
-                opacity: scrolledToBottom ? 0 : 1,
+                opacity: (!overflows || scrolledToBottom) ? 0 : 1,
                 transition: 'opacity 0.3s',
               }}>
                 <span style={{
@@ -1093,25 +1286,68 @@ function Compare() {
               letterSpacing: '0.06em', textTransform: 'uppercase',
               fontFamily: T.mono,
             }}>match</div>
-            <pre style={{
-              padding: 20, margin: 0,
-              fontSize: 12.5, fontFamily: T.mono,
-              color: T.codeText, lineHeight: 1.8,
-              whiteSpace: 'pre-wrap',
-            }}>{`atext: any of (letter, digit, exclamation, hash, dollar, percent, ampersand, single quote, asterisk, plus, slash, equals, question, caret, underscore, backtick, open brace, pipe, close brace, tilde, hyphen)
-dotted: one or more atext joined by period
-qtext: any of (printable except (double quote, backslash), space, tab)
-qpair: backslash then printable
-quoted: double quote then zero or more (qtext or qpair) then double quote
-local: dotted or quoted
-label: one or more of (letter, digit, hyphen)
-hostname: label joined by period
-octet: between 1 and 3 digits
-addr: octet joined by period
-ip literal: open bracket then addr then close bracket
-domain: hostname or ip literal
-email: local then at then domain`}</pre>
+            <div style={{ position: 'relative', flex: 1, overflow: 'auto' }}>
+              <AnimatePresence initial={false} mode="popLayout">
+                <motion.pre
+                  key={active}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0, position: 'absolute', top: 0, left: 0, right: 0 }}
+                  transition={{ duration: 0.25 }}
+                  style={{
+                    padding: 20, margin: 0,
+                    fontSize: 12.5, fontFamily: T.mono,
+                    color: T.codeText, lineHeight: 1.8,
+                    whiteSpace: 'pre-wrap',
+                  }}
+                >{c.match}</motion.pre>
+              </AnimatePresence>
+            </div>
           </div>
+        </div>
+
+        <div style={{
+          display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center',
+          marginTop: 20,
+        }}>
+          <button onClick={goPrev} className="feature-nav-btn" style={{
+            width: 32, height: 32, borderRadius: 6,
+            border: `1px solid ${T.borderHover}`, background: T.surface,
+            color: T.text, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'all 0.2s', padding: 0,
+          }}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M8.5 3L4.5 7L8.5 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          {comparisons.map((_, i) => (
+            <button
+              key={i}
+              onClick={() => manualNav(i)}
+              style={{
+                width: 32, height: 32,
+                borderRadius: 6,
+                border: `1px solid ${i === active ? T.text : i < active ? T.textMuted : T.border}`,
+                cursor: 'pointer',
+                background: i === active ? T.text : i < active ? T.textMuted : T.surface,
+                opacity: i === active ? 1 : i < active ? 0.35 : 0.5,
+                transition: 'all 0.3s',
+                padding: 0,
+              }}
+            />
+          ))}
+          <button onClick={goNext} className="feature-nav-btn" style={{
+            width: 32, height: 32, borderRadius: 6,
+            border: `1px solid ${T.borderHover}`, background: T.surface,
+            color: T.text, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'all 0.2s', padding: 0,
+          }}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M5.5 3L9.5 7L5.5 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         </div>
       </FadeIn>
 
@@ -1531,7 +1767,7 @@ function Pricing() {
         }}>
           Pricing
         </p>
-        <h2 className="section-heading">Simple, honest pricing</h2>
+        <h2 className="section-heading">Own your software</h2>
         <p style={{ textAlign: 'center', color: T.textSecondary, fontSize: 15, marginTop: 16, marginBottom: 64 }}>
           Free for personal, educational, and open-source use.
         </p>
@@ -2178,6 +2414,10 @@ export default function App() {
 
         .nav-link {
           font-size: 13px; color: ${T.textMuted}; transition: color 0.2s;
+          position: relative;
+        }
+        .nav-link::before {
+          content: ''; position: absolute; left: 0; right: 0; top: -12px; bottom: -12px;
         }
         .nav-link:hover { color: ${T.text}; }
 
