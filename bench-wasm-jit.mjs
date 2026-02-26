@@ -1,5 +1,5 @@
 import { parse, compile } from './dist/esm/index.js';
-import { wasmFastMatch } from './dist/esm/executor/wasm.js';
+import { wasmFastMatch, wasmFastMatchString } from './dist/esm/executor/wasm.js';
 import { fastMatch } from './dist/esm/executor/fast.js';
 
 const enc = new TextEncoder();
@@ -145,7 +145,11 @@ for (const b of benchmarks) {
   const mOk = mR >= 0;
   if (mOk !== reR) console.log(`  !! ${b.name}: correctness mismatch match=${mR} regex=${reR}`);
 
-  const engine = bytes.length < 128 ? 'JS' : 'WASM';
+  const sR = wasmFastMatchString(cp, b.input);
+  const sOk = sR >= 0;
+  if (sOk !== reR) console.log(`  !! ${b.name}: string path mismatch matchStr=${sR} regex=${reR}`);
+
+  const engine = bytes.length < 64 ? 'JS' : 'WASM';
   const mMs = bench(() => wasmFastMatch(cp, bytes), iters);
   const reMs = bench(() => b.regex.test(b.input), iters);
 

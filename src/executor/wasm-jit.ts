@@ -33,7 +33,25 @@ const I32_LOAD16_U = 0x2F;
 const I32_OR = 0x72;
 const I32_XOR = 0x73;
 const I32_GE_U = 0x4F;
+const I32_GT_U = 0x4B;
 const I32_LE_U = 0x4D;
+
+const V128 = 0x7B;
+const SIMD_PREFIX = 0xFD;
+const V128_LOAD = 0;
+const V128_CONST = 12;
+const I8X16_EXTRACT_LANE_S = 21;
+const I8X16_SPLAT = 15;
+const I8X16_SWIZZLE = 14;
+const V128_AND = 80;
+const V128_OR = 81;
+const I8X16_ALL_TRUE = 99;
+const I8X16_SUB = 113;
+const I8X16_LE_U = 42;
+const I8X16_EQ = 35;
+const I32X4_EXTRACT_LANE = 27;
+const I8X16_NE = 36;
+const I8X16_SHR_U = 109;
 
 const L_PTR = 0;
 const L_LEN = 1;
@@ -43,12 +61,15 @@ const L_TMP2 = 4;
 const L_CNT = 5;
 const L_SAV = 6;
 
+const INPUT_BASE = 65536;
+
 class E {
   buf: number[] = [];
   segs: { off: number; data: number[] }[] = [];
   dOff = 0;
   depth = 0;
   bsCache = new Map<string, number>();
+  simd = false;
   b(v: number) { this.buf.push(v & 0xFF); }
   u(v: number) { do { let b = v & 0x7F; v >>>= 7; if (v) b |= 0x80; this.buf.push(b); } while (v); }
   s(v: number) { let m = true; while (m) { let b = v & 0x7F; v >>= 7; if ((v === 0 && (b & 0x40) === 0) || (v === -1 && (b & 0x40) !== 0)) m = false; else b |= 0x80; this.buf.push(b); } }
@@ -122,25 +143,170 @@ function bsToRanges(bs: Uint32Array): [number, number][] | null {
   return null;
 }
 
-function emitRangeCheck(w: E, ranges: [number, number][], byteL: number) {
-  if (ranges.length === 1) {
-    const [lo, hi] = ranges[0];
-    if (lo === hi) {
-      lget(w, byteL); iconst(w, lo); w.b(I32_EQ);
-    } else {
-      lget(w, byteL); iconst(w, lo); w.b(I32_SUB); iconst(w, hi - lo); w.b(I32_LE_U);
-    }
-  } else {
-    const [lo1, hi1] = ranges[0];
-    const [lo2, hi2] = ranges[1];
-    if (hi1 - lo1 === hi2 - lo2 && lo2 - lo1 === 0x20) {
-      lget(w, byteL); iconst(w, 0x20); w.b(I32_OR); iconst(w, lo2); w.b(I32_SUB); iconst(w, hi2 - lo2); w.b(I32_LE_U);
-    } else {
-      lget(w, byteL); iconst(w, lo1); w.b(I32_SUB); iconst(w, hi1 - lo1); w.b(I32_LE_U);
-      lget(w, byteL); iconst(w, lo2); w.b(I32_SUB); iconst(w, hi2 - lo2); w.b(I32_LE_U);
-      w.b(I32_OR);
+function simdOp(w: E, op: number) { w.b(SIMD_PREFIX); w.u(op); }
+
+function v128const(w: E, bytes: number[]) {
+  simdOp(w, V128_CONST);
+  for (let i = 0; i < 16; i++) w.b(bytes[i] || 0);
+}
+
+function buildBsNibbleTables(bs: Uint32Array): { lo: number[]; hi: number[] } {
+  const lo = new Array(16).fill(0);
+  const hi = new Array(16).fill(0);
+  for (let c = 0; c < 256; c++) {
+    if ((bs[c >>> 5] & (1 << (c & 31))) !== 0) {
+      const ln = c & 0xF;
+      const hn = (c >>> 4) & 0xF;
+      lo[ln] |= (1 << hn);
+      hi[hn] |= (1 << ln);
     }
   }
+  return { lo, hi };
+}
+
+function v128lget(w: E, l: number) { w.b(LOCAL_GET); w.u(l); }
+function v128lset(w: E, l: number) { w.b(LOCAL_SET); w.u(l); }
+function v128ltee(w: E, l: number) { w.b(LOCAL_TEE); w.u(l); }
+
+function emitSimdOneRange(w: E, lo: number, hi: number) {
+  v128const(w, new Array(16).fill(lo));
+  simdOp(w, I8X16_SUB);
+  v128const(w, new Array(16).fill(hi - lo));
+  simdOp(w, I8X16_LE_U);
+}
+
+function emitSimdCaseFold(w: E, r2: [number, number]) {
+  v128const(w, new Array(16).fill(0x20));
+  simdOp(w, V128_OR);
+  v128const(w, new Array(16).fill(r2[0]));
+  simdOp(w, I8X16_SUB);
+  v128const(w, new Array(16).fill(r2[1] - r2[0]));
+  simdOp(w, I8X16_LE_U);
+}
+
+function bsToRangesExt(bs: Uint32Array): [number, number][] | null {
+  const ranges: [number, number][] = [];
+  let start = -1;
+  for (let i = 0; i < 256; i++) {
+    const set = (bs[i >>> 5] & (1 << (i & 31))) !== 0;
+    if (set && start < 0) start = i;
+    else if (!set && start >= 0) { ranges.push([start, i - 1]); start = -1; }
+  }
+  if (start >= 0) ranges.push([start, 255]);
+  if (ranges.length >= 1 && ranges.length <= 4) return ranges;
+  return null;
+}
+
+function emitSimdBsCheck16(w: E, bs: Uint32Array) {
+  const ranges = bsToRangesExt(bs);
+  if (ranges) {
+    const used = new Array(ranges.length).fill(false);
+    const parts: (() => void)[] = [];
+    for (let i = 0; i < ranges.length; i++) {
+      if (used[i]) continue;
+      let paired = false;
+      for (let j = i + 1; j < ranges.length; j++) {
+        if (!used[j] && isCaseFold(ranges[i], ranges[j])) {
+          const r2 = ranges[j];
+          parts.push(() => emitSimdCaseFold(w, r2));
+          used[i] = used[j] = true; paired = true; break;
+        }
+      }
+      if (!paired) {
+        const [lo, hi] = ranges[i];
+        parts.push(() => emitSimdOneRange(w, lo, hi));
+        used[i] = true;
+      }
+    }
+    if (parts.length === 1) {
+      parts[0]();
+    } else {
+      v128ltee(w, L_VEC);
+      parts[0]();
+      for (let i = 1; i < parts.length; i++) {
+        v128lget(w, L_VEC);
+        parts[i]();
+        simdOp(w, V128_OR);
+      }
+    }
+    return;
+  }
+  const { lo, hi } = buildBsNibbleTables(bs);
+  v128ltee(w, L_VEC);
+  v128const(w, new Array(16).fill(0x0F));
+  simdOp(w, V128_AND);
+  v128const(w, hi);
+  simdOp(w, I8X16_SWIZZLE);
+  v128lget(w, L_VEC);
+  iconst(w, 4);
+  simdOp(w, I8X16_SHR_U);
+  v128const(w, new Array(16).fill(0x0F));
+  simdOp(w, V128_AND);
+  v128const(w, lo);
+  simdOp(w, I8X16_SWIZZLE);
+  simdOp(w, V128_AND);
+  v128const(w, new Array(16).fill(0));
+  simdOp(w, I8X16_NE);
+}
+
+const L_VEC = 7;
+
+function needsSimd(op: CompiledOp): boolean {
+  switch (op.op) {
+    case Op.FAST_REPEAT_BITSET: return true;
+    case Op.FAST_BETWEEN_BITSET: return true;
+  }
+  if (op.child && needsSimd(op.child)) return true;
+  if (op.child2 && needsSimd(op.child2)) return true;
+  if (op.child3 && needsSimd(op.child3)) return true;
+  if (op.children) for (const c of op.children) if (needsSimd(c)) return true;
+  if (op.separator && needsSimd(op.separator)) return true;
+  if (op.terminator && needsSimd(op.terminator)) return true;
+  if (op.negated && needsSimd(op.negated)) return true;
+  if (op.flatTail) for (const c of op.flatTail) if (needsSimd(c)) return true;
+  if (op.flatSteps) for (const s of op.flatSteps) {
+    if (s.fop === FlatOp.F_REPEAT_BITSET || s.fop === FlatOp.F_BETWEEN_BITSET) return true;
+    if (s.child && needsSimd(s.child)) return true;
+  }
+  return false;
+}
+
+function emitOneRange(w: E, lo: number, hi: number, byteL: number) {
+  if (lo === hi) { lget(w, byteL); iconst(w, lo); w.b(I32_EQ); }
+  else { lget(w, byteL); iconst(w, lo); w.b(I32_SUB); iconst(w, hi - lo); w.b(I32_LE_U); }
+}
+
+function isCaseFold(r1: [number, number], r2: [number, number]): boolean {
+  return r1[1] - r1[0] === r2[1] - r2[0] && r2[0] - r1[0] === 0x20;
+}
+
+function emitCaseFold(w: E, r1: [number, number], r2: [number, number], byteL: number) {
+  lget(w, byteL); iconst(w, 0x20); w.b(I32_OR); iconst(w, r2[0]); w.b(I32_SUB); iconst(w, r2[1] - r2[0]); w.b(I32_LE_U);
+}
+
+function emitRangeCheck(w: E, ranges: [number, number][], byteL: number) {
+  if (ranges.length === 1) {
+    emitOneRange(w, ranges[0][0], ranges[0][1], byteL);
+    return;
+  }
+  if (ranges.length === 2 && isCaseFold(ranges[0], ranges[1])) {
+    emitCaseFold(w, ranges[0], ranges[1], byteL);
+    return;
+  }
+  const used = new Array(ranges.length).fill(false);
+  let count = 0;
+  for (let i = 0; i < ranges.length; i++) {
+    if (used[i]) continue;
+    let paired = false;
+    for (let j = i + 1; j < ranges.length; j++) {
+      if (!used[j] && isCaseFold(ranges[i], ranges[j])) {
+        emitCaseFold(w, ranges[i], ranges[j], byteL);
+        used[i] = used[j] = true; paired = true; count++; break;
+      }
+    }
+    if (!paired) { emitOneRange(w, ranges[i][0], ranges[i][1], byteL); used[i] = true; count++; }
+  }
+  for (let i = 1; i < count; i++) w.b(I32_OR);
 }
 
 function bsCheck(w: E, e: E, bs: Uint32Array, byteL: number) {
@@ -154,6 +320,80 @@ function bsCheck(w: E, e: E, bs: Uint32Array, byteL: number) {
   w.b(I32_LOAD); w.u(2); w.u(0);
   iconst(w, 1); lget(w, byteL); iconst(w, 31); w.b(I32_AND); w.b(I32_SHL);
   w.b(I32_AND);
+}
+
+function bsToRangesShort(bs: Uint32Array): [number, number][] | null {
+  const ranges: [number, number][] = [];
+  let start = -1;
+  for (let i = 0; i < 256; i++) {
+    const set = (bs[i >>> 5] & (1 << (i & 31))) !== 0;
+    if (set && start < 0) start = i;
+    else if (!set && start >= 0) { ranges.push([start, i - 1]); start = -1; }
+  }
+  if (start >= 0) ranges.push([start, 255]);
+  if (ranges.length >= 1 && ranges.length <= 2) return ranges;
+  return null;
+}
+
+function emitUnrolled4xBody(w: E, lo: number, span: number, ptrL: number): void {
+  lget(w, ptrL); w.b(I32_LOAD8_U); w.u(0); w.u(0); iconst(w, lo); w.b(I32_SUB); iconst(w, span); w.b(I32_GT_U);
+  lget(w, ptrL); w.b(I32_LOAD8_U); w.u(0); w.u(1); iconst(w, lo); w.b(I32_SUB); iconst(w, span); w.b(I32_GT_U);
+  w.b(I32_OR);
+  lget(w, ptrL); w.b(I32_LOAD8_U); w.u(0); w.u(2); iconst(w, lo); w.b(I32_SUB); iconst(w, span); w.b(I32_GT_U);
+  w.b(I32_OR);
+  lget(w, ptrL); w.b(I32_LOAD8_U); w.u(0); w.u(3); iconst(w, lo); w.b(I32_SUB); iconst(w, span); w.b(I32_GT_U);
+  w.b(I32_OR);
+}
+
+function emitUnrolled4x(w: E, bs: Uint32Array, ptrL: number, limitL: number): boolean {
+  const ranges = bsToRangesShort(bs);
+  if (!ranges || ranges.length !== 1) return false;
+  const [lo, hi] = ranges[0];
+  const span = hi - lo;
+  lget(w, limitL); iconst(w, 4); w.b(I32_SUB); lset(w, L_TMP);
+  w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+  lget(w, ptrL); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+  emitUnrolled4xBody(w, lo, span, ptrL);
+  w.b(BR_IF); w.u(1);
+  lget(w, ptrL); iconst(w, 4); w.b(I32_ADD); lset(w, ptrL);
+  w.b(BR); w.u(0); w.b(END); w.b(END);
+  return true;
+}
+
+function emitUnrolled4xCounted(w: E, bs: Uint32Array, ptrL: number, ptrLimitL: number, cntL: number, maxCnt: number): boolean {
+  const ranges = bsToRangesShort(bs);
+  if (!ranges || ranges.length !== 1 || maxCnt < 8) return false;
+  const [lo, hi] = ranges[0];
+  const span = hi - lo;
+  lget(w, ptrLimitL); iconst(w, 4); w.b(I32_SUB); lset(w, L_TMP);
+  w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+  lget(w, ptrL); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+  lget(w, cntL); iconst(w, maxCnt - 3); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+  emitUnrolled4xBody(w, lo, span, ptrL);
+  w.b(BR_IF); w.u(1);
+  lget(w, ptrL); iconst(w, 4); w.b(I32_ADD); lset(w, ptrL);
+  lget(w, cntL); iconst(w, 4); w.b(I32_ADD); lset(w, cntL);
+  w.b(BR); w.u(0); w.b(END); w.b(END);
+  return true;
+}
+
+function emitInlineLoopCheck(w: E, e: E, bs: Uint32Array, ptrL: number, tmpL: number): void {
+  const ranges = bsToRangesShort(bs);
+  if (ranges) {
+    lget(w, ptrL); w.b(I32_LOAD8_U); w.u(0); w.u(0);
+    if (ranges.length === 1) {
+      const [lo, hi] = ranges[0];
+      if (lo === hi) { iconst(w, lo); w.b(I32_NE); }
+      else { iconst(w, lo); w.b(I32_SUB); iconst(w, hi - lo); w.b(I32_GT_U); }
+    } else {
+      lset(w, tmpL);
+      emitRangeCheck(w, ranges, tmpL);
+      iconst(w, 0); w.b(I32_EQ);
+    }
+  } else {
+    lget(w, ptrL); w.b(I32_LOAD8_U); w.u(0); w.u(0); lset(w, tmpL); bsCheck(w, e, bs, tmpL);
+    iconst(w, 0); w.b(I32_EQ);
+  }
 }
 
 function fail(w: E, fd: number | null) {
@@ -295,10 +535,21 @@ function emitOp(w: E, e: E, op: CompiledOp, rules: CompiledOp[], rfi: Map<number
       lget(w, L_POS); lset(w, L_SAV);
       lget(w, L_PTR); lget(w, L_LEN); w.b(I32_ADD); lset(w, L_CNT);
       lget(w, L_PTR); lget(w, L_POS); w.b(I32_ADD); lset(w, L_TMP2);
+      if (e.simd) {
+        lget(w, L_CNT); iconst(w, 16); w.b(I32_SUB); lset(w, L_TMP);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_TMP2); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); simdOp(w, V128_LOAD); w.u(2); w.u(0);
+        emitSimdBsCheck16(w, bs);
+        simdOp(w, I8X16_ALL_TRUE); iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); iconst(w, 16); w.b(I32_ADD); lset(w, L_TMP2);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+      }
+      emitUnrolled4x(w, bs, L_TMP2, L_CNT);
       w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
       lget(w, L_TMP2); lget(w, L_CNT); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
-      lget(w, L_TMP2); w.b(I32_LOAD8_U); w.u(0); w.u(0); lset(w, L_TMP); bsCheck(w, e, bs, L_TMP);
-      iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+      emitInlineLoopCheck(w, e, bs, L_TMP2, L_TMP);
+      w.b(BR_IF); w.u(1);
       lget(w, L_TMP2); iconst(w, 1); w.b(I32_ADD); lset(w, L_TMP2);
       w.b(BR); w.u(0); w.b(END); w.b(END);
       lget(w, L_TMP2); lget(w, L_PTR); w.b(I32_SUB); lset(w, L_POS);
@@ -331,11 +582,24 @@ function emitOp(w: E, e: E, op: CompiledOp, rules: CompiledOp[], rfi: Map<number
       iconst(w, 0); lset(w, L_CNT);
       lget(w, L_PTR); lget(w, L_LEN); w.b(I32_ADD); lset(w, L_SAV);
       lget(w, L_PTR); lget(w, L_POS); w.b(I32_ADD); lset(w, L_TMP2);
+      if (e.simd && hi >= 16) {
+        lget(w, L_SAV); iconst(w, 16); w.b(I32_SUB); lset(w, L_TMP);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_TMP2); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+        lget(w, L_CNT); iconst(w, hi - 15); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); simdOp(w, V128_LOAD); w.u(2); w.u(0);
+        emitSimdBsCheck16(w, bs);
+        simdOp(w, I8X16_ALL_TRUE); iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); iconst(w, 16); w.b(I32_ADD); lset(w, L_TMP2);
+        lget(w, L_CNT); iconst(w, 16); w.b(I32_ADD); lset(w, L_CNT);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+      }
+      emitUnrolled4xCounted(w, bs, L_TMP2, L_SAV, L_CNT, hi);
       w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
       lget(w, L_TMP2); lget(w, L_SAV); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
       lget(w, L_CNT); iconst(w, hi); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
-      lget(w, L_TMP2); w.b(I32_LOAD8_U); w.u(0); w.u(0); lset(w, L_TMP); bsCheck(w, e, bs, L_TMP);
-      iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+      emitInlineLoopCheck(w, e, bs, L_TMP2, L_TMP);
+      w.b(BR_IF); w.u(1);
       lget(w, L_TMP2); iconst(w, 1); w.b(I32_ADD); lset(w, L_TMP2);
       lget(w, L_CNT); iconst(w, 1); w.b(I32_ADD); lset(w, L_CNT);
       w.b(BR); w.u(0); w.b(END); w.b(END);
@@ -709,14 +973,30 @@ function emitFlat(w: E, e: E, st: FlatStep, rules: CompiledOp[], rfi: Map<number
     case FlatOp.F_BETWEEN_BITSET: {
       const bs = st.bitset!; const lo = st.min!; const hi = st.max!;
       iconst(w, 0); lset(w, L_CNT);
+      lget(w, L_PTR); lget(w, L_POS); w.b(I32_ADD); lset(w, L_TMP2);
+      lget(w, L_PTR); lget(w, L_LEN); w.b(I32_ADD); lset(w, L_SAV);
+      if (e.simd && hi >= 16) {
+        lget(w, L_SAV); iconst(w, 16); w.b(I32_SUB); lset(w, L_TMP);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_TMP2); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+        lget(w, L_CNT); iconst(w, hi - 15); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); simdOp(w, V128_LOAD); w.u(2); w.u(0);
+        emitSimdBsCheck16(w, bs);
+        simdOp(w, I8X16_ALL_TRUE); iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); iconst(w, 16); w.b(I32_ADD); lset(w, L_TMP2);
+        lget(w, L_CNT); iconst(w, 16); w.b(I32_ADD); lset(w, L_CNT);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+      }
+      emitUnrolled4xCounted(w, bs, L_TMP2, L_SAV, L_CNT, hi);
       w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
-      lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+      lget(w, L_TMP2); lget(w, L_SAV); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
       lget(w, L_CNT); iconst(w, hi); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
-      load8(w, L_POS); lset(w, L_TMP); bsCheck(w, e, bs, L_TMP);
-      iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
-      lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
+      emitInlineLoopCheck(w, e, bs, L_TMP2, L_TMP);
+      w.b(BR_IF); w.u(1);
+      lget(w, L_TMP2); iconst(w, 1); w.b(I32_ADD); lset(w, L_TMP2);
       lget(w, L_CNT); iconst(w, 1); w.b(I32_ADD); lset(w, L_CNT);
       w.b(BR); w.u(0); w.b(END); w.b(END);
+      lget(w, L_TMP2); lget(w, L_PTR); w.b(I32_SUB); lset(w, L_POS);
       if (lo > 0) { lget(w, L_CNT); iconst(w, lo); w.b(I32_LT_S); w.b(IF); w.b(VOID); fail(w, fd); w.b(END); }
       break;
     }
@@ -725,10 +1005,21 @@ function emitFlat(w: E, e: E, st: FlatStep, rules: CompiledOp[], rfi: Map<number
       lget(w, L_POS); lset(w, L_SAV);
       lget(w, L_PTR); lget(w, L_LEN); w.b(I32_ADD); lset(w, L_CNT);
       lget(w, L_PTR); lget(w, L_POS); w.b(I32_ADD); lset(w, L_TMP2);
+      if (e.simd) {
+        lget(w, L_CNT); iconst(w, 16); w.b(I32_SUB); lset(w, L_TMP);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_TMP2); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); simdOp(w, V128_LOAD); w.u(2); w.u(0);
+        emitSimdBsCheck16(w, bs);
+        simdOp(w, I8X16_ALL_TRUE); iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); iconst(w, 16); w.b(I32_ADD); lset(w, L_TMP2);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+      }
+      emitUnrolled4x(w, bs, L_TMP2, L_CNT);
       w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
       lget(w, L_TMP2); lget(w, L_CNT); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
-      lget(w, L_TMP2); w.b(I32_LOAD8_U); w.u(0); w.u(0); lset(w, L_TMP); bsCheck(w, e, bs, L_TMP);
-      iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+      emitInlineLoopCheck(w, e, bs, L_TMP2, L_TMP);
+      w.b(BR_IF); w.u(1);
       lget(w, L_TMP2); iconst(w, 1); w.b(I32_ADD); lset(w, L_TMP2);
       w.b(BR); w.u(0); w.b(END); w.b(END);
       lget(w, L_TMP2); lget(w, L_PTR); w.b(I32_SUB); lset(w, L_POS);
@@ -799,10 +1090,28 @@ function uleb(v: number): number[] { const o: number[] = []; do { let b = v & 0x
 function sleb(v: number): number[] { const o: number[] = []; let m = true; while (m) { let b = v & 0x7F; v >>= 7; if ((v === 0 && (b & 0x40) === 0) || (v === -1 && (b & 0x40) !== 0)) m = false; else b |= 0x80; o.push(b); } return o; }
 function sec(id: number, c: number[]): number[] { return [id, ...uleb(c.length), ...c]; }
 
-export function emitWasmBinary(cp: CompiledProgram): Uint8Array {
+let _simdSupported: boolean | null = null;
+function simdSupported(): boolean {
+  if (_simdSupported !== null) return _simdSupported;
+  try {
+    const test = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,5,1,1,102,0,0,10,18,1,16,0,253,12,42,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,253,21,0,11]);
+    new WebAssembly.Module(test);
+    _simdSupported = true;
+  } catch { _simdSupported = false; }
+  return _simdSupported;
+}
+
+export function emitWasmBinary(cp: CompiledProgram, useSimd?: boolean): Uint8Array {
   const e = new E();
   const rules = cp.rules;
   const ei = cp.entryIdx;
+
+  const wantSimd = useSimd ?? simdSupported();
+  let anyNeedsSimd = false;
+  if (wantSimd) {
+    for (const r of rules) if (needsSimd(r)) { anyNeedsSimd = true; break; }
+  }
+  e.simd = wantSimd && anyNeedsSimd;
 
   const refs = new Set<number>();
   function scan(op: CompiledOp) {
@@ -822,7 +1131,12 @@ export function emitWasmBinary(cp: CompiledProgram): Uint8Array {
   const bodies: number[][] = [];
 
   const mw = new E();
-  mw.u(1); mw.u(5); mw.b(I32);
+  mw.simd = e.simd;
+  if (e.simd) {
+    mw.u(2); mw.u(5); mw.b(I32); mw.u(1); mw.b(V128);
+  } else {
+    mw.u(1); mw.u(5); mw.b(I32);
+  }
   iconst(mw, 0); lset(mw, L_POS);
   emitOp(mw, e, rules[ei], rules, rfi, cp, null);
   lget(mw, L_POS); mw.b(END);
@@ -831,7 +1145,12 @@ export function emitWasmBinary(cp: CompiledProgram): Uint8Array {
   for (let i = 0; i < rules.length; i++) {
     if (rfi.has(i)) {
       const rw = new E();
-      rw.u(1); rw.u(4); rw.b(I32);
+      rw.simd = e.simd;
+      if (e.simd) {
+        rw.u(2); rw.u(4); rw.b(I32); rw.u(1); rw.b(V128);
+      } else {
+        rw.u(1); rw.u(4); rw.b(I32);
+      }
       emitOp(rw, e, rules[i], rules, rfi, cp, null);
       lget(rw, L_POS); rw.b(END);
       bodies.push(rw.buf);
@@ -869,34 +1188,62 @@ interface JitCached {
   memory: WebAssembly.Memory;
   matchFn: (ptr: number, len: number) => number;
   view: Uint8Array;
-  viewLen: number;
+  inputView: Uint8Array;
+  bufLen: number;
 }
 
 const jitCache = new WeakMap<CompiledProgram, JitCached>();
+const jitEnc = new TextEncoder();
 
-export function jitMatch(cp: CompiledProgram, input: Uint8Array): number {
-  let cached = jitCache.get(cp);
+function ensureJit(cp: CompiledProgram): JitCached | null {
+  let cached = (cp as any)._jit as JitCached | undefined;
+  if (cached) return cached;
+  cached = jitCache.get(cp);
   if (!cached) {
     try {
       const { instance } = jitCompile(cp);
       const memory = instance.exports.memory as WebAssembly.Memory;
       const matchFn = instance.exports.match as (ptr: number, len: number) => number;
       const view = new Uint8Array(memory.buffer);
-      cached = { memory, matchFn, view, viewLen: memory.buffer.byteLength };
+      const inputView = view.subarray(INPUT_BASE);
+      cached = { memory, matchFn, view, inputView, bufLen: memory.buffer.byteLength };
       jitCache.set(cp, cached);
     } catch {
-      return -2;
+      return null;
     }
   }
-  const { memory, matchFn } = cached;
-  const needed = 65536 + input.length + 256;
-  if (memory.buffer.byteLength < needed) {
-    try { memory.grow(Math.ceil((needed - memory.buffer.byteLength) / 65536) + 1); } catch { return -2; }
+  try { (cp as any)._jit = cached; } catch {}
+  return cached;
+}
+
+function ensureCapacity(cached: JitCached, bytes: number): boolean {
+  const needed = INPUT_BASE + bytes + 16;
+  if (needed > cached.bufLen) {
+    try { cached.memory.grow(Math.ceil((needed - cached.bufLen) / 65536) + 1); } catch { return false; }
+    cached.view = new Uint8Array(cached.memory.buffer);
+    cached.inputView = cached.view.subarray(INPUT_BASE);
+    cached.bufLen = cached.memory.buffer.byteLength;
   }
-  if (cached.viewLen !== memory.buffer.byteLength) {
-    cached.view = new Uint8Array(memory.buffer);
-    cached.viewLen = memory.buffer.byteLength;
-  }
-  cached.view.set(input, 65536);
-  return matchFn(65536, input.length);
+  return true;
+}
+
+export function jitMatch(cp: CompiledProgram, input: Uint8Array): number {
+  const cached = ensureJit(cp);
+  if (!cached) return -2;
+  const len = input.length;
+  if (!ensureCapacity(cached, len)) return -2;
+  cached.view.set(input, INPUT_BASE);
+  return cached.matchFn(INPUT_BASE, len);
+}
+
+export function jitMatchString(cp: CompiledProgram, input: string): number {
+  const cached = ensureJit(cp);
+  if (!cached) return -2;
+  const slen = input.length;
+  if (!ensureCapacity(cached, slen * 3)) return -2;
+  const { written } = jitEnc.encodeInto(input, cached.inputView);
+  const consumed = cached.matchFn(INPUT_BASE, written!);
+  if (consumed === written) return slen;
+  if (consumed < 0) return consumed;
+  return consumed;
 }

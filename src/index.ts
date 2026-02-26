@@ -3,7 +3,7 @@ import { parse as parseTokens } from './parser/parser.js';
 import { validate } from './validator/validator.js';
 import { execute, executePartial } from './executor/executor.js';
 import { compile, fastMatch, CompiledProgram } from './executor/fast.js';
-import { wasmFastMatch } from './executor/wasm.js';
+import { wasmFastMatchString } from './executor/wasm.js';
 import { formatFailure, formatTree } from './diagnostics/formatter.js';
 import { MatchProgram, ParseOptions, RuleNode, UseNode } from './types/ast.js';
 import { MatchResult, MatchSuccess, PartialResult } from './types/result.js';
@@ -148,12 +148,10 @@ function getRuleRefs(node: import('./types/ast.js').ASTNode): string[] {
 }
 // @api-parse-end
 
-const encoder = new TextEncoder();
-
 // @api-match
 // Execution tier selection:
-//   1. If a CompiledProgram exists, run the fast path (wasmFastMatch) as a pre-check.
-//      wasmFastMatch picks WASM for inputs >= 40 bytes, JS fast path otherwise.
+//   1. If a CompiledProgram exists, run the fast path (wasmFastMatchString) as a pre-check.
+//      wasmFastMatchString encodes directly into WASM memory (zero-copy for large inputs).
 //   2. If the fast path confirms full-input success, run the tree executor with
 //      skipFailureTracking=true (faster — no expected-set or rule-stack recording).
 //   3. If the fast path reports failure (or no compiled program), run the tree
@@ -162,9 +160,8 @@ const encoder = new TextEncoder();
 export function match(program: MatchProgram, input: string): MatchResult {
   const cp: CompiledProgram | undefined = (program as any).__compiled;
   if (cp) {
-    const inputBytes = encoder.encode(input);
-    const consumed = wasmFastMatch(cp, inputBytes);
-    if (consumed === inputBytes.length) {
+    const consumed = wasmFastMatchString(cp, input);
+    if (consumed === input.length) {
       return execute(program, input, true);
     }
   }
