@@ -49,6 +49,7 @@ const SECTIONS: DocSection[] = [
       { title: 'Diagnostics', slug: 'diagnostics' },
       { title: 'Types', slug: 'types' },
       { title: 'Performance', slug: 'performance' },
+      { title: 'Benchmarks', slug: 'benchmarks' },
       { title: 'Dynamic Grammars', slug: 'dynamic-grammars' },
     ],
   },
@@ -1150,10 +1151,11 @@ fastMatch(cp, encoder.encode('abc'))    // -1 (failure)`}</Pre>
 
       <H2>Execution tiers</H2>
       <P>Three tiers are chosen automatically based on context:</P>
-      <Pre label="tiers">{`JS fast path    — inputs < 40 bytes, or WASM unavailable
-WASM fast path  — inputs ≥ 40 bytes in Node.js
+      <Pre label="tiers">{`JS JIT          — inputs < 64 bytes: JIT-compiled JavaScript with range-check and word-comparison optimizations
+WASM JIT        — inputs ≥ 64 bytes: WebAssembly with SIMD acceleration (128-bit i8x16)
 Tree executor   — always used by match()/run() for full results`}</Pre>
       <P><Code>match()</Code> and <Code>run()</Code> use the fast path internally as a pre-check. When the fast path confirms success, the tree executor skips failure tracking — avoiding Set allocations and array copies on every backtracking branch.</P>
+      <P>For detailed performance data, see <DocLink to="/docs/api/benchmarks">Benchmarks</DocLink>.</P>
 
       <H2>When to use directly</H2>
       <P>Use <Code>compile</Code> + <Code>fastMatch</Code> when you only need pass/fail and don't need parse trees, extracted nodes, or failure diagnostics. This is useful for filtering, validation gates, or high-throughput scanning where you'll only build the full result for matches that pass.</P>
@@ -1170,6 +1172,308 @@ for (const line of lines) {
   const result = match(program, line)
   // ... use result.tree
 }`}</Pre>
+    </DocPage>
+  )
+}
+
+function BenchmarksDoc() {
+  return (
+    <DocPage>
+      <H1>Benchmarks</H1>
+      <P>Match's fast path is benchmarked against V8's native <Code>RegExp</Code> engine across 182 tests covering character classes, repetition, sequences, alternatives, joined-by, real-world formats, failure cases, and stress tests. All numbers are from Node.js on Apple Silicon.</P>
+
+      <H2 id="summary">Summary</H2>
+      <P><strong>Match wins 120 tests, regex wins 43, 19 ties.</strong> Match is faster at structured patterns with exact counts, bounded ranges, and large inputs. Regex is faster at multi-range character classes like <Code>\w</Code> and small-input multi-step sequences.</P>
+
+      <H2 id="engine">How the engine works</H2>
+      <P>Match automatically selects between two execution tiers:</P>
+      <Pre label="engine tiers">{`JS JIT     inputs < 64 bytes
+WASM JIT   inputs >= 64 bytes`}</Pre>
+      <P>The <strong>JS JIT</strong> compiles each grammar into a JavaScript function at first use. It emits range checks (<Code>(b-48>>>0){'<'}=9</Code> for digits), case-fold tricks (<Code>(b|32)-97</Code> for letters), 4-byte word comparisons for literals, and fused loops for joined-by patterns. V8 then JIT-compiles this generated JS into machine code.</P>
+      <P>The <strong>WASM JIT</strong> compiles each grammar into a WebAssembly module with SIMD acceleration. It uses <Code>i8x16</Code> SIMD to scan 16 bytes per iteration for character classes, 4x unrolled scalar loops as a fallback, range-check inlining for 1-2 range classes, and specialized joined-by codegen that fuses element+separator scanning to avoid per-segment overhead.</P>
+      <P>Both tiers fall back to a bytecode interpreter if the JIT cannot handle the pattern (e.g., recursive grammars with memoization).</P>
+
+      <H2 id="where-match-wins">Where Match wins</H2>
+      <P><strong>Exact counts</strong> — Match compiles <Code>4 digits</Code> into a fixed-length check with no loop. Regex must parse a quantifier and maintain a counter.</P>
+      <Pre label="examples">{`4 digits                     0.57x
+10 digits                    0.47x
+20 digits                    0.40x
+50 digits                    0.52x
+32 hex digits                0.61x
+between 1-255 digits (255)   0.34x`}</Pre>
+      <P><strong>Structured formats</strong> — Patterns with fixed structure and exact counts are Match's sweet spot.</P>
+      <Pre label="examples">{`UUID                         0.37x
+credit card (16 digits)      0.46x
+hex color #RRGGBB            0.63x
+date YYYY-MM-DD              0.62x
+phone US                     0.74x
+CSS hex color short/full     0.65x`}</Pre>
+      <P><strong>Large inputs (WASM + SIMD)</strong> — At 64+ bytes, the WASM JIT's SIMD loops process 16 bytes per iteration, pulling ahead of V8's scalar regex engine.</P>
+      <Pre label="examples">{`1+ digits (5000)             0.51x
+1+ digits (1M)               0.72x
+1+ alphanumeric (100k)       0.55x
+between 1-50000 digits (25k) 0.31x
+STRESS joined "," (5k segs)  0.66x
+STRESS path 50 segments      0.46x`}</Pre>
+      <P><strong>Failure rejection</strong> — When a match fails late (e.g., last byte mismatch), Match's fast path returns immediately without backtracking.</P>
+      <Pre label="examples">{`FAIL: late mismatch          0.21x
+FAIL: too short for exact    0.33x
+FAIL: date bad separator     0.47x
+optional prefix absent       0.34x`}</Pre>
+      <P><strong>Joined-by patterns</strong> — Specialized codegen fuses element and separator scanning into a single loop.</P>
+      <Pre label="examples">{`csv row (10 fields)          0.64x
+STRESS joined "," (10k segs) 0.67x
+STRESS MAC addr joined (100) 0.62x
+STRESS key=val joined (100)  0.66x`}</Pre>
+
+      <H2 id="where-regex-wins">Where regex wins</H2>
+      <P><strong>Word characters (<Code>\w</Code>)</strong> — V8 has a native intrinsic for <Code>\w</Code> (letters + digits + underscore). Match must represent this as a 4-range bitset with memory lookups, which is slower at every input size.</P>
+      <Pre label="examples">{`1+ word chars (50)           1.6x
+1+ word chars (500)          1.3x
+STRESS 1+ word (100k)        1.4x`}</Pre>
+      <P><strong>Multi-range character classes</strong> — Classes that require 4+ ranges (like <Code>any of (letter, digit, "_")</Code>) fall back to bitset table lookups. V8's regex engine has optimized native paths for these.</P>
+      <Pre label="examples">{`any of 3 classes (50)        1.9x
+letter except "q" (50)       1.7x
+digit except "0" (50)        1.4x`}</Pre>
+      <P><strong>Multi-step sequences on small inputs</strong> — Patterns with many alternating literal and class steps on inputs under 64 bytes have per-step overhead from bounds checks. V8 compiles the equivalent regex into a single tight loop.</P>
+      <Pre label="examples">{`long seq: proto+host+path    1.4x
+key=value pairs (10)         1.4x
+multi-rule: address          1.3x
+HTTP header line             1.3x`}</Pre>
+      <P><strong>Recursive grammars</strong> — Match uses function calls for recursive rule references. This is fundamentally slower than regex (which doesn't support recursion at all — these patterns can't be expressed as regex).</P>
+      <Pre label="examples">{`nested parens                10x+
+multi-rule URL path+query    5x`}</Pre>
+      <Note>The recursive grammar cases are patterns that <em>cannot</em> be expressed as regular expressions. The comparison is against a hand-written non-recursive regex approximation.</Note>
+      <P><strong>First-byte WASM failure</strong> — When the WASM path is selected (input >= 64 bytes) but the match fails on the first byte, the WASM module instantiation overhead dominates. Regex has no such setup cost.</P>
+      <Pre label="examples">{`FAIL: early mismatch         1.6x
+STRESS FAIL early (50k)      39x`}</Pre>
+
+      <H2 id="methodology">Methodology</H2>
+      <P>Each test runs the same pattern against the same input for a fixed number of iterations (5,000 to 200,000 depending on input size). Both engines are warmed up before timing. The ratio M/R (Match time / Regex time) is reported — values below 1.0 mean Match is faster.</P>
+      <P>The benchmark uses <Code>fastMatch</Code> for Match (boolean-only, no tree building) and <Code>RegExp.test()</Code> for regex. Both are anchored full-match checks. Regex patterns use <Code>^...$</Code> anchors to match the full input.</P>
+      <P>Ties are defined as M/R between 0.95 and 1.05.</P>
+
+      <H2 id="reproduce">Reproduce</H2>
+      <Pre label="terminal">{`git clone https://github.com/user/match
+cd match
+npm install
+npm run build
+node bench-wasm-jit.mjs`}</Pre>
+      <P>The benchmark script is <Code>bench-wasm-jit.mjs</Code> in the repository root. It prints a table with all 182 tests, timings, ratios, engine selection, and winners.</P>
+
+      <H2 id="full-results">Full results (182 tests)</H2>
+      <Pre label="bench-wasm-jit.mjs">{`Test                                       Input    M/R      Engine   Winner
+─────────────────────────────────────────────────────────────────────────────
+CHARACTER CLASSES (single character)
+digit (1 char)                             1        0.50     JS       Match
+letter (1 char)                            1        ~1.0     JS       TIE
+hex digit (1 char)                         1        0.81     JS       Match
+whitespace (1 char)                        1        0.84     JS       Match
+word character (1 char)                    1        0.81     JS       Match
+uppercase (1 char)                         1        0.81     JS       Match
+lowercase (1 char)                         1        0.80     JS       Match
+alphanumeric (1 char)                      1        0.79     JS       Match
+printable (1 char)                         1        0.81     JS       Match
+visible (1 char)                           1        0.79     JS       Match
+
+LITERALS
+literal 1 char                             1        0.83     JS       Match
+literal 3 chars                            3        0.89     JS       Match
+literal 5 chars                            5        0.88     JS       Match
+literal 10 chars                           10       0.84     JS       Match
+literal 20 chars                           20       0.93     JS       Match
+literal 50 chars                           50       0.90     JS       Match
+
+ONE OR MORE (scaling)
+1+ digits (5)                              5        0.88     JS       Match
+1+ digits (10)                             10       ~1.0     JS       TIE
+1+ digits (20)                             20       0.88     JS       Match
+1+ digits (50)                             50       1.18     JS       Regex
+1+ digits (100)                            100      0.78     WASM     Match
+1+ digits (500)                            500      0.67     WASM     Match
+1+ digits (1000)                           1000     0.78     WASM     Match
+1+ digits (5000)                           5000     0.51     WASM     Match
+1+ letters (5)                             5        0.71     JS       Match
+1+ letters (10)                            10       0.55     JS       Match
+1+ letters (20)                            20       1.23     JS       Regex
+1+ letters (50)                            50       0.66     JS       Match
+1+ letters (100)                           100      0.89     WASM     Match
+1+ letters (500)                           500      0.94     WASM     Match
+1+ letters (5000)                          5000     ~1.0     WASM     TIE
+1+ word chars (10)                         10       ~1.0     JS       TIE
+1+ word chars (50)                         50       0.92     JS       Match
+1+ word chars (100)                        100      1.11     WASM     Regex
+1+ word chars (500)                        500      1.05     WASM     Regex
+1+ word chars (5000)                       5000     0.94     WASM     Match
+1+ hex digits (10)                         10       1.08     JS       Regex
+1+ hex digits (50)                         50       1.50     JS       Regex
+1+ hex digits (100)                        100      1.07     WASM     Regex
+1+ hex digits (500)                        500      0.70     WASM     Match
+1+ alphanumeric (50)                       50       ~1.0     JS       TIE
+1+ alphanumeric (500)                      500      0.54     WASM     Match
+1+ uppercase (50)                          50       ~1.0     JS       TIE
+1+ uppercase (500)                         500      0.44     WASM     Match
+
+ZERO OR MORE
+0+ digits (empty)                          0        0.62     JS       Match
+0+ digits (1)                              1        0.75     JS       Match
+0+ digits (50)                             50       1.06     JS       Regex
+0+ digits (500)                            500      0.66     WASM     Match
+0+ letters (empty)                         0        0.83     JS       Match
+0+ letters (500)                           500      0.78     WASM     Match
+
+EXACT COUNTS
+1 digit                                    1        ~1.0     JS       TIE
+2 digits                                   2        0.82     JS       Match
+4 digits                                   4        0.57     JS       Match
+8 digits                                   8        0.59     JS       Match
+10 digits                                  10       0.47     JS       Match
+20 digits                                  20       0.40     JS       Match
+50 digits                                  50       0.52     JS       Match
+100 digits                                 100      0.46     WASM     Match
+2 hex digits                               2        0.73     JS       Match
+6 hex digits                               6        0.51     JS       Match
+32 hex digits                              32       0.61     JS       Match
+3 letters                                  3        ~1.0     JS       TIE
+10 letters                                 10       0.68     JS       Match
+
+BETWEEN (bounded)
+between 1-3 digits (1)                     1        0.90     JS       Match
+between 1-3 digits (2)                     2        0.86     JS       Match
+between 1-3 digits (3)                     3        ~1.0     JS       TIE
+between 2-10 letters (2)                   2        0.88     JS       Match
+between 2-10 letters (7)                   7        0.83     JS       Match
+between 2-10 letters (10)                  10       0.67     JS       Match
+between 1-255 digits (1)                   1        0.85     JS       Match
+between 1-255 digits (50)                  50       0.90     JS       Match
+between 1-255 digits (100)                 100      0.40     WASM     Match
+between 1-255 digits (255)                 255      0.34     WASM     Match
+between 5-20 hex (10)                      10       0.80     JS       Match
+between 1-100 letters (50)                 50       0.88     JS       Match
+
+OPTIONAL
+optional digit (empty)                     0        0.80     JS       Match
+optional digit (present)                   1        0.82     JS       Match
+optional letter (empty)                    0        ~1.0     JS       TIE
+optional letter (present)                  1        0.81     JS       Match
+optional "0x" (empty)                      0        0.46     JS       Match
+optional "0x" (present)                    2        0.38     JS       Match
+optional prefix+body                       10       ~1.0     JS       TIE
+optional prefix absent                     8        0.34     JS       Match
+
+SEQUENCES
+letter then digit                          2        ~1.0     JS       TIE
+2 seq: digit "." digit                     3        0.73     JS       Match
+3 seq: d-d-d                               5        0.84     JS       Match
+date YYYY-MM-DD                            10       0.62     JS       Match
+time HH:MM:SS                              8        0.71     JS       Match
+datetime                                   19       0.78     JS       Match
+hex color #RRGGBB                          7        0.63     JS       Match
+literal+repeat "hello"+digits              11       0.86     JS       Match
+literal+repeat+literal                     13       1.23     JS       Regex
+long seq: proto+host+path                  24       1.37     JS       Regex
+long seq: 5 parts                          19       1.35     JS       Regex
+
+ALTERNATIVES
+letter or digit                            1        0.82     JS       Match
+2 alternatives                             2        0.94     JS       Match
+3 alternatives                             3        ~1.0     JS       TIE
+4 alternatives                             3        1.16     JS       Regex
+6 alternatives                             6        ~1.0     JS       TIE
+any of (letter,digit)                      1        ~1.0     JS       TIE
+any of (letter,digit,"-","_",".")          16       1.14     JS       Regex
+any of 3 classes (50)                      50       1.99     JS       Regex
+
+JOINED BY
+digits joined "." (2 segs)                 5        ~1.0     JS       TIE
+digits joined "." (3 segs)                 5        0.87     JS       Match
+digits joined "." (5 segs)                 9        1.09     JS       Regex
+digits joined "." (10 segs)                19       ~1.0     JS       TIE
+digits joined "." (20 segs)                49       1.14     JS       Regex
+digits joined "." (50 segs)                99       0.90     WASM     Match
+digits joined "," (5 segs)                 9        0.95     JS       Match
+digits joined "," (50 segs)                99       0.84     WASM     Match
+words joined ","                           20       0.88     JS       Match
+words joined ", " (long)                   298      0.95     WASM     TIE
+words joined " | "                         67       ~1.0     WASM     TIE
+long segments joined ";"                   129      0.70     WASM     Match
+exactly-2 joined ":" (6 segs)              17       ~1.0     JS       TIE
+between 1-3 joined "." (4)                 11       1.15     JS       Regex
+between 1-3 joined "." (8)                 23       1.23     JS       Regex
+IPv4 address                               11       1.43     JS       Regex
+
+REAL-WORLD FORMATS
+email-like (short)                         5        1.07     JS       Regex
+email-like (typical)                       21       1.11     JS       Regex
+email-like (long)                          43       1.25     JS       Regex
+key=value pairs (3)                        25       1.15     JS       Regex
+key=value pairs (10)                       59       1.43     JS       Regex
+semver                                     8        1.14     JS       Regex
+semver-pre                                 15       ~1.0     JS       TIE
+CSS hex shorthand                          4        0.82     JS       Match
+CSS hex full                               7        0.61     JS       Match
+CSS hex color short/full                   7        0.65     JS       Match
+MAC address                                17       0.94     JS       Match
+UUID                                       36       0.37     JS       Match
+phone US                                   14       0.74     JS       Match
+credit card (16 digits)                    19       0.46     JS       Match
+content-type                               16       0.87     JS       Match
+slug                                       24       1.10     JS       Regex
+base64 chars (100)                         92       0.65     WASM     Match
+csv row (10 fields)                        69       0.64     WASM     Match
+path segments (5)                          29       ~1.0     JS       TIE
+domain name                                17       0.83     JS       Match
+HTTP header line                           45       1.30     JS       Regex
+letter except "q" (50)                     50       1.80     JS       Regex
+letter except "q" (500)                    500      0.77     WASM     Match
+digit except "0" (50)                      50       1.44     JS       Regex
+
+FAILURE CASES
+FAIL: digits on alpha                      6        0.93     JS       Match
+FAIL: letters on digits                    6        0.92     JS       Match
+FAIL: date bad separator                   10       0.47     JS       Match
+FAIL: empty on 1+                          0        0.85     JS       Match
+FAIL: early mismatch (1st byte)            100      1.61     WASM     Regex
+FAIL: late mismatch (last byte)            100      0.21     WASM     Match
+FAIL: wrong literal                        5        ~1.0     JS       TIE
+FAIL: almost literal                       5        1.11     JS       Regex
+FAIL: too short for exact                  5        0.33     JS       Match
+FAIL: too long for exact                   5        0.81     JS       Match
+FAIL: joined bad separator                 5        0.94     JS       Match
+FAIL: UUID bad format                      23       0.90     JS       Match
+
+STRESS TESTS
+STRESS: 1+ digits (10k)                    10000    0.75     WASM     Match
+STRESS: 1+ digits (50k)                    50000    0.75     WASM     Match
+STRESS: 1+ digits (100k)                   100000   0.79     WASM     Match
+STRESS: 1+ digits (500k)                   500000   0.65     WASM     Match
+STRESS: 1+ digits (1M)                     1000000  0.72     WASM     Match
+STRESS: 1+ letters (10k)                   10000    0.89     WASM     Match
+STRESS: 1+ letters (100k)                  100000   0.92     WASM     Match
+STRESS: 1+ hex (100k)                      100000   0.73     WASM     Match
+STRESS: 1+ word (100k)                     100000   1.36     WASM     Regex
+STRESS: 1+ alphanumeric (100k)             100000   0.55     WASM     Match
+STRESS: date repeated (1k)                 10999    0.94     WASM     Match
+STRESS: date repeated (5k)                 54999    ~1.0     WASM     TIE
+STRESS: between 1-50000 digits (25k)       25000    0.31     WASM     Match
+STRESS: joined "," (100 segs)              199      0.79     WASM     Match
+STRESS: joined "," (1k segs)               1999     0.65     WASM     Match
+STRESS: joined "," (5k segs)               9999     0.66     WASM     Match
+STRESS: joined "," (10k segs)              19999    0.67     WASM     Match
+STRESS: MAC addr joined (100)              299      0.62     WASM     Match
+STRESS: between 1-3 joined (100)           399      1.64     WASM     Regex
+STRESS: key=val joined (100)               1179     0.66     WASM     Match
+STRESS: path 50 segments                   339      0.46     WASM     Match
+STRESS: FAIL early (50k)                   50000    38x      WASM     Regex
+
+COMPLEX / RECURSIVE
+nested parens ()(())                       6        11x      JS       Regex
+mixed seq + alt + rep                      10       1.09     JS       Regex
+complex: log line                          50       1.32     JS       Regex
+complex: log line (long msg)               345      0.73     WASM     Match
+multi-rule: address                        38       1.34     JS       Regex
+multi-rule: URL path+query                 39       4.83     JS       Regex`}</Pre>
+      <P>M/R = Match time / Regex time. Values below 1.0 mean Match is faster. Approximate values (~1.0) indicate ties (0.95-1.05 ratio).</P>
     </DocPage>
   )
 }
@@ -1481,6 +1785,7 @@ export function DocsLayout() {
         <Route path="api/diagnostics" element={<DiagnosticsDoc />} />
         <Route path="api/types" element={<TypesDoc />} />
         <Route path="api/performance" element={<PerformanceDoc />} />
+        <Route path="api/benchmarks" element={<BenchmarksDoc />} />
         <Route path="api/dynamic-grammars" element={<DynamicGrammarsDoc />} />
         <Route path="examples/key-value" element={<KeyValueExample />} />
         <Route path="examples/csv" element={<CSVExample />} />

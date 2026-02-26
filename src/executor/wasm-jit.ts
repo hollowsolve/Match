@@ -777,20 +777,122 @@ function emitOp(w: E, e: E, op: CompiledOp, rules: CompiledOp[], rfi: Map<number
     }
     case Op.FAST_JOINED_BYTE: {
       const sep = op.byte!;
-      emitOp(w, e, op.child!, rules, rfi, cp, fd);
-      w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
-      lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
-      load8(w, L_POS); iconst(w, sep); w.b(I32_NE); w.b(BR_IF); w.u(1);
-      lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
-      lget(w, L_POS); lset(w, L_SAV);
-      w.b(BLOCK); w.b(VOID);
-      emitOp(w, e, op.child!, rules, rfi, cp, 0);
-      lget(w, L_POS); lget(w, L_SAV); w.b(I32_EQ); w.b(BR_IF); w.u(0);
-      lget(w, L_POS); iconst(w, 0); w.b(I32_LT_S); w.b(BR_IF); w.u(0);
-      w.b(BR); w.u(1);
-      w.b(END);
-      lget(w, L_SAV); iconst(w, 1); w.b(I32_SUB); lset(w, L_POS);
-      w.b(END); w.b(END);
+      const jbChild = op.child!;
+      if (jbChild.op === Op.FAST_REPEAT_BITSET) {
+        const jbBs = jbChild.bitset!; const jbMin = jbChild.min!;
+        lget(w, L_POS); lset(w, L_SAV);
+        lget(w, L_PTR); lget(w, L_LEN); w.b(I32_ADD); lset(w, L_CNT);
+        lget(w, L_PTR); lget(w, L_POS); w.b(I32_ADD); lset(w, L_TMP2);
+        if (e.simd) {
+          lget(w, L_CNT); iconst(w, 16); w.b(I32_SUB); lset(w, L_TMP);
+          w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+          lget(w, L_TMP2); lget(w, L_TMP); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+          lget(w, L_TMP2); simdOp(w, V128_LOAD); w.u(2); w.u(0);
+          emitSimdBsCheck16(w, jbBs);
+          simdOp(w, I8X16_ALL_TRUE); iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+          lget(w, L_TMP2); iconst(w, 16); w.b(I32_ADD); lset(w, L_TMP2);
+          w.b(BR); w.u(0); w.b(END); w.b(END);
+        }
+        emitUnrolled4x(w, jbBs, L_TMP2, L_CNT);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_TMP2); lget(w, L_CNT); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        emitInlineLoopCheck(w, e, jbBs, L_TMP2, L_TMP);
+        w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); iconst(w, 1); w.b(I32_ADD); lset(w, L_TMP2);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+        lget(w, L_TMP2); lget(w, L_PTR); w.b(I32_SUB); lset(w, L_POS);
+        if (jbMin > 0) { lget(w, L_POS); lget(w, L_SAV); w.b(I32_SUB); iconst(w, jbMin); w.b(I32_LT_S); w.b(IF); w.b(VOID); fail(w, fd); w.b(END); }
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        load8(w, L_POS); iconst(w, sep); w.b(I32_NE); w.b(BR_IF); w.u(1);
+        lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
+        lget(w, L_POS); lset(w, L_SAV);
+        lget(w, L_PTR); lget(w, L_POS); w.b(I32_ADD); lset(w, L_TMP2);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_TMP2); lget(w, L_CNT); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        emitInlineLoopCheck(w, e, jbBs, L_TMP2, L_TMP);
+        w.b(BR_IF); w.u(1);
+        lget(w, L_TMP2); iconst(w, 1); w.b(I32_ADD); lset(w, L_TMP2);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+        lget(w, L_TMP2); lget(w, L_PTR); w.b(I32_SUB); lset(w, L_POS);
+        lget(w, L_POS); lget(w, L_SAV); w.b(I32_SUB); iconst(w, jbMin); w.b(I32_LT_S);
+        w.b(IF); w.b(VOID);
+          lget(w, L_SAV); iconst(w, 1); w.b(I32_SUB); lset(w, L_POS);
+          w.b(BR); w.u(2);
+        w.b(END);
+        w.b(BR); w.u(0);
+        w.b(END); w.b(END);
+      } else if (jbChild.op === Op.FAST_EXACTLY_BITSET) {
+        const jbBs = jbChild.bitset!; const jbN = jbChild.min!;
+        lget(w, L_POS); iconst(w, jbN); w.b(I32_ADD); lget(w, L_LEN); w.b(I32_GT_S);
+        w.b(IF); w.b(VOID); fail(w, fd); w.b(END);
+        for (let i = 0; i < jbN; i++) {
+          load8off(w, L_POS, i); lset(w, L_TMP); bsCheck(w, e, jbBs, L_TMP);
+          iconst(w, 0); w.b(I32_EQ); w.b(IF); w.b(VOID); fail(w, fd); w.b(END);
+        }
+        lget(w, L_POS); iconst(w, jbN); w.b(I32_ADD); lset(w, L_POS);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        load8(w, L_POS); iconst(w, sep); w.b(I32_NE); w.b(BR_IF); w.u(1);
+        lget(w, L_POS); iconst(w, 1 + jbN); w.b(I32_ADD); lget(w, L_LEN); w.b(I32_GT_S); w.b(BR_IF); w.u(1);
+        w.b(BLOCK); w.b(VOID);
+        for (let i = 0; i < jbN; i++) {
+          load8off(w, L_POS, 1 + i); lset(w, L_TMP); bsCheck(w, e, jbBs, L_TMP);
+          iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(0);
+        }
+        lget(w, L_POS); iconst(w, 1 + jbN); w.b(I32_ADD); lset(w, L_POS);
+        w.b(BR); w.u(1);
+        w.b(END);
+        w.b(END); w.b(END);
+      } else if (jbChild.op === Op.FAST_BETWEEN_BITSET) {
+        const jbBs = jbChild.bitset!; const jbLo = jbChild.min!; const jbHi = jbChild.max!;
+        iconst(w, 0); lset(w, L_CNT);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        lget(w, L_CNT); iconst(w, jbHi); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        load8(w, L_POS); lset(w, L_TMP); bsCheck(w, e, jbBs, L_TMP);
+        iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+        lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
+        lget(w, L_CNT); iconst(w, 1); w.b(I32_ADD); lset(w, L_CNT);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+        lget(w, L_CNT); iconst(w, jbLo); w.b(I32_LT_S); w.b(IF); w.b(VOID); fail(w, fd); w.b(END);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        load8(w, L_POS); iconst(w, sep); w.b(I32_NE); w.b(BR_IF); w.u(1);
+        lget(w, L_POS); lset(w, L_SAV);
+        lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
+        iconst(w, 0); lset(w, L_CNT);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        lget(w, L_CNT); iconst(w, jbHi); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        load8(w, L_POS); lset(w, L_TMP); bsCheck(w, e, jbBs, L_TMP);
+        iconst(w, 0); w.b(I32_EQ); w.b(BR_IF); w.u(1);
+        lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
+        lget(w, L_CNT); iconst(w, 1); w.b(I32_ADD); lset(w, L_CNT);
+        w.b(BR); w.u(0); w.b(END); w.b(END);
+        lget(w, L_CNT); iconst(w, jbLo); w.b(I32_LT_S);
+        w.b(IF); w.b(VOID);
+          lget(w, L_SAV); lset(w, L_POS);
+          w.b(BR); w.u(2);
+        w.b(END);
+        w.b(BR); w.u(0);
+        w.b(END); w.b(END);
+      } else {
+        emitOp(w, e, jbChild, rules, rfi, cp, fd);
+        w.b(BLOCK); w.b(VOID); w.b(LOOP); w.b(VOID);
+        lget(w, L_POS); lget(w, L_LEN); w.b(I32_GE_S); w.b(BR_IF); w.u(1);
+        load8(w, L_POS); iconst(w, sep); w.b(I32_NE); w.b(BR_IF); w.u(1);
+        lget(w, L_POS); iconst(w, 1); w.b(I32_ADD); lset(w, L_POS);
+        lget(w, L_POS); lset(w, L_SAV);
+        w.b(BLOCK); w.b(VOID);
+        emitOp(w, e, jbChild, rules, rfi, cp, 0);
+        lget(w, L_POS); lget(w, L_SAV); w.b(I32_EQ); w.b(BR_IF); w.u(0);
+        lget(w, L_POS); iconst(w, 0); w.b(I32_LT_S); w.b(BR_IF); w.u(0);
+        w.b(BR); w.u(1);
+        w.b(END);
+        lget(w, L_SAV); iconst(w, 1); w.b(I32_SUB); lset(w, L_POS);
+        w.b(END); w.b(END);
+      }
       break;
     }
     case Op.FAST_REP_BITSET_ALT: {

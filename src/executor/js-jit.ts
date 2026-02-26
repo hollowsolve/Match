@@ -87,6 +87,20 @@ class Ctx {
   }
 }
 
+function emitLitCheck(tb: Uint8Array, base: string, failCode: string): string {
+  let s = '';
+  let i = 0;
+  while (i + 4 <= tb.length) {
+    const w = (tb[i]) | (tb[i + 1] << 8) | (tb[i + 2] << 16) | (tb[i + 3] << 24);
+    s += `if((d[${base}${i ? '+' + i : ''}]|(d[${base}+${i + 1}]<<8)|(d[${base}+${i + 2}]<<16)|(d[${base}+${i + 3}]<<24))!==${w | 0})${failCode}`;
+    i += 4;
+  }
+  for (; i < tb.length; i++) {
+    s += `if(d[${base}${i ? '+' + i : ''}]!==${tb[i]})${failCode}`;
+  }
+  return s;
+}
+
 function bsToRangesJs(bs: Uint32Array): [number, number][] | null {
   const ranges: [number, number][] = [];
   let start = -1;
@@ -137,6 +151,12 @@ function emitEntry(ctx: Ctx, entry: CompiledOp, cp: CompiledProgram): string | n
     case Op.TEXT:
     case Op.FAST_SEQ_BYTES: {
       const tb = entry.textBytes!;
+      if (tb.length >= 4) {
+        let s = `if(l!==${tb.length})return -1;`;
+        s += emitLitCheck(tb, '0', 'return -1;');
+        s += `return ${tb.length};`;
+        return s;
+      }
       const name = ctx.capture(tb);
       let s = `if(l!==${tb.length})return -1;`;
       s += `for(var i=0;i<${tb.length};i++)if(d[i]!==${name}[i])return -1;`;
@@ -318,6 +338,12 @@ function emitPosOp(ctx: Ctx, op: CompiledOp, cp: CompiledProgram): string | null
     case Op.TEXT:
     case Op.FAST_SEQ_BYTES: {
       const tb = op.textBytes!;
+      if (tb.length >= 4) {
+        let s = `if(p+${tb.length}>l)return -1;`;
+        s += emitLitCheck(tb, 'p', 'return -1;');
+        s += `p+=${tb.length};`;
+        return s;
+      }
       const name = ctx.capture(tb);
       return `if(p+${tb.length}>l)return -1;for(var i=0;i<${tb.length};i++)if(d[p+i]!==${name}[i])return -1;p+=${tb.length};`;
     }
@@ -871,6 +897,12 @@ function emitFlatStepInline(ctx: Ctx, st: import('./fast-types.js').FlatStep, cp
 function emitAltChild(ctx: Ctx, op: CompiledOp): string | null {
   if (op.op === Op.TEXT || op.op === Op.FAST_SEQ_BYTES) {
     const tb = op.textBytes!;
+    if (tb.length >= 4) {
+      let s = `if(l!==${tb.length})return -1;`;
+      s += emitLitCheck(tb, '0', 'return -1;');
+      s += `return ${tb.length};`;
+      return s;
+    }
     const name = ctx.capture(tb);
     return `if(l!==${tb.length})return -1;for(var i=0;i<${tb.length};i++)if(d[i]!==${name}[i])return -1;return ${tb.length};`;
   }
@@ -991,6 +1023,12 @@ function emitFlatStep(ctx: Ctx, st: import('./fast-types.js').FlatStep, cp: Comp
     }
     case FlatOp.F_SEQ_BYTES: {
       const tb = st.textBytes!;
+      if (tb.length >= 4) {
+        let s = `if(p+${tb.length}>l)return -1;`;
+        s += emitLitCheck(tb, 'p', 'return -1;');
+        s += `p+=${tb.length};`;
+        return s;
+      }
       const name = ctx.capture(tb);
       return `if(p+${tb.length}>l)return -1;for(var i=0;i<${tb.length};i++)if(d[p+i]!==${name}[i])return -1;p+=${tb.length};`;
     }
@@ -1006,8 +1044,15 @@ function emitFlatStep(ctx: Ctx, st: import('./fast-types.js').FlatStep, cp: Comp
     case FlatOp.F_LITERAL_REPEAT_BS: {
       const tb = st.textBytes!;
       const e = bsExpr(ctx, st.bitset!, 'b');
-      const name = ctx.capture(tb);
-      let code = `if(p+${tb.length}>l)return -1;for(var i=0;i<${tb.length};i++)if(d[p+i]!==${name}[i])return -1;p+=${tb.length};`;
+      let code;
+      if (tb.length >= 4) {
+        code = `if(p+${tb.length}>l)return -1;`;
+        code += emitLitCheck(tb, 'p', 'return -1;');
+        code += `p+=${tb.length};`;
+      } else {
+        const name = ctx.capture(tb);
+        code = `if(p+${tb.length}>l)return -1;for(var i=0;i<${tb.length};i++)if(d[p+i]!==${name}[i])return -1;p+=${tb.length};`;
+      }
       code += `var sp=p;while(p<l){var b=d[p];if(!(${e}))break;p++;}if(p-sp<${st.min!})return -1;`;
       return code;
     }
@@ -1016,8 +1061,14 @@ function emitFlatStep(ctx: Ctx, st: import('./fast-types.js').FlatStep, cp: Comp
       let code = '';
       for (const sg of segs) {
         const be = bsExpr(ctx, sg.bitset, 'b');
-        const tname = ctx.capture(sg.textBytes);
-        code += `if(p+${sg.textBytes.length}>l)return -1;for(var i=0;i<${sg.textBytes.length};i++)if(d[p+i]!==${tname}[i])return -1;p+=${sg.textBytes.length};`;
+        if (sg.textBytes.length >= 4) {
+          code += `if(p+${sg.textBytes.length}>l)return -1;`;
+          code += emitLitCheck(sg.textBytes, 'p', 'return -1;');
+          code += `p+=${sg.textBytes.length};`;
+        } else {
+          const tname = ctx.capture(sg.textBytes);
+          code += `if(p+${sg.textBytes.length}>l)return -1;for(var i=0;i<${sg.textBytes.length};i++)if(d[p+i]!==${tname}[i])return -1;p+=${sg.textBytes.length};`;
+        }
         code += `var sp=p;while(p<l){var b=d[p];if(!(${be}))break;p++;}if(p-sp<${sg.min})return -1;`;
       }
       return code;

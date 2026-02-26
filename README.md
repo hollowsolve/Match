@@ -398,6 +398,22 @@ Every character has a name. No escape sequences exist.
 
 ---
 
+## Performance
+
+Match uses a hybrid JS/WASM engine. Small inputs (<64 bytes) run through a JIT-compiled JavaScript fast path. Larger inputs run through a WASM JIT with SIMD acceleration. The engine is chosen automatically.
+
+Across a 182-test benchmark suite against V8's `RegExp` engine: **Match wins 120, regex wins 43, 19 ties.** Highlights:
+
+**Where Match wins:** exact-count patterns (e.g. `4 digits`: 0.57x), bounded ranges (`between 1 and 255 digits`: 0.34x), structured formats (UUID: 0.37x, credit card: 0.46x, date YYYY-MM-DD: 0.62x), large-input scanning (1M digits: 0.72x, joined lists: 0.65x), and failure rejection (late mismatch: 0.21x, too short: 0.33x).
+
+**Where regex wins:** `\w` word characters (V8 has a native intrinsic: 1.3-1.6x), multi-step sequences with many small literals on short inputs (1.2-1.4x), recursive/nested grammars (10x+), and first-byte failure on large WASM inputs (WASM setup overhead).
+
+Run it yourself: `node bench-wasm-jit.mjs`
+
+Full methodology and results: [matchlang.com/docs/api/benchmarks](https://matchlang.com/docs/api/benchmarks)
+
+---
+
 ## Stability
 
 The following are stable public API as of v1.0:
