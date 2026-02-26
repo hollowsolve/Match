@@ -2,7 +2,7 @@
 
 A pattern matching language that replaces regular expressions. [Website](https://matchlang.com) · [Docs](https://matchlang.com/docs) · [Playground](https://matchlang.com/playground)
 
-> Free for personal, educational, and open-source use. Commercial use requires a [one-time license](https://matchlang.com).
+> MIT licensed. Free for any use.
 
 ## Install
 
@@ -400,9 +400,15 @@ Every character has a name. No escape sequences exist.
 
 ## Performance
 
-Match uses a hybrid JS/WASM engine. Small inputs (<64 bytes) run through a JIT-compiled JavaScript fast path. Larger inputs run through a WASM JIT with SIMD acceleration. The engine is chosen automatically.
+Match uses a three-tier execution engine:
 
-Across a 182-test benchmark suite against V8's `RegExp` engine: **Match wins 120, regex wins 43, 19 ties.** Highlights:
+1. **JS JIT** — small inputs (<32 bytes). Generates optimized JavaScript with i32 word-comparison for literals.
+2. **WASM JIT** — larger inputs (≥32 bytes). SIMD-accelerated matching with specialized joined-by and repeat handlers.
+3. **WASM tree executor** — on the success path, a bytecode VM in WASM builds the parse tree directly, bypassing the JS recursive descent executor.
+
+The engine tier is chosen automatically. The fast paths handle boolean matching; the tree executor reconstructs full `RuleMatch` trees from WASM memory events.
+
+Across a 182-test benchmark suite against V8's `RegExp` engine: **Match wins 123, regex wins 41, 18 ties.** Highlights:
 
 **Where Match wins:** exact-count patterns (e.g. `4 digits`: 0.57x), bounded ranges (`between 1 and 255 digits`: 0.34x), structured formats (UUID: 0.37x, credit card: 0.46x, date YYYY-MM-DD: 0.62x), large-input scanning (1M digits: 0.72x, joined lists: 0.65x), and failure rejection (late mismatch: 0.21x, too short: 0.33x).
 
@@ -428,4 +434,4 @@ These will not change in backward-incompatible ways without a major version bump
 
 ## License
 
-Free for personal, educational, and open-source use. Commercial use requires a one-time license at [matchlang.com](https://matchlang.com). See [LICENSE](./LICENSE).
+MIT License. See [LICENSE](./LICENSE).

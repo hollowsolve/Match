@@ -595,9 +595,9 @@ function emitInline(ctx: Ctx, op: CompiledOp, cp: CompiledProgram): string | nul
     case Op.TEXT:
     case Op.FAST_SEQ_BYTES: {
       const tb = op.textBytes!;
-      const name = ctx.capture(tb);
-      let s = `if(p+${tb.length}>l)p=-1;`;
-      s += `else{for(var i=0;i<${tb.length};i++)if(d[p+i]!==${name}[i]){p=-1;break;}if(p>=0)p+=${tb.length};}`;
+      let s = `if(p+${tb.length}>l)p=-1;else{`;
+      s += emitLitCheck(tb, 'p', '{p=-1;}');
+      s += `if(p>=0)p+=${tb.length};}`;
       return s;
     }
     case Op.CHAR_CLASS_DIGIT:
@@ -873,9 +873,9 @@ function emitFlatStepInline(ctx: Ctx, st: import('./fast-types.js').FlatStep, cp
     }
     case FlatOp.F_SEQ_BYTES: {
       const tb = st.textBytes!;
-      const name = ctx.capture(tb);
-      let s = `if(p+${tb.length}>l)p=-1;`;
-      s += `else{for(var i=0;i<${tb.length};i++)if(d[p+i]!==${name}[i]){p=-1;break;}if(p>=0)p+=${tb.length};}`;
+      let s = `if(p+${tb.length}>l)p=-1;else{`;
+      s += emitLitCheck(tb, 'p', '{p=-1;}');
+      s += `if(p>=0)p+=${tb.length};}`;
       return s;
     }
     case FlatOp.F_BETWEEN_BITSET: {

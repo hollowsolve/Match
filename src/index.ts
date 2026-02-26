@@ -3,7 +3,7 @@ import { parse as parseTokens } from './parser/parser.js';
 import { validate } from './validator/validator.js';
 import { execute, executePartial } from './executor/executor.js';
 import { compile, fastMatch, CompiledProgram } from './executor/fast.js';
-import { wasmFastMatchString } from './executor/wasm.js';
+import { wasmFastMatchString, vmMatchTree } from './executor/wasm.js';
 import { formatFailure, formatTree } from './diagnostics/formatter.js';
 import { MatchProgram, ParseOptions, RuleNode, UseNode } from './types/ast.js';
 import { MatchResult, MatchSuccess, PartialResult } from './types/result.js';
@@ -17,6 +17,8 @@ export { formatFailure, formatTree } from './diagnostics/formatter.js';
 export { FindMatch, find } from './executor/executor.js';
 export { compile, fastMatch, CompiledProgram } from './executor/fast.js';
 export { LineMatch, SearchError, SearchResult, SearchOptions, StreamSearchOptions, searchString, searchFile, searchFolder, searchFolderStream, searchStream, searchFileStream, formatSearchResults } from './search/search.js';
+export { vmMatch, vmMatchString } from './executor/vm-exec.js';
+export { vmCompile } from './executor/vm-compile.js';
 
 // @api-parse
 // Compiles the grammar into an AST and attaches a bytecode CompiledProgram
@@ -157,11 +159,22 @@ function getRuleRefs(node: import('./types/ast.js').ASTNode): string[] {
 //   3. If the fast path reports failure (or no compiled program), run the tree
 //      executor with full failure tracking for detailed diagnostics.
 // The tree executor always runs — it's the only path that produces parse trees.
+const matchEnc = new TextEncoder();
 export function match(program: MatchProgram, input: string): MatchResult {
   const cp: CompiledProgram | undefined = (program as any).__compiled;
   if (cp) {
     const consumed = wasmFastMatchString(cp, input);
     if (consumed === input.length) {
+      const inputBytes = matchEnc.encode(input);
+      const treeResult = vmMatchTree(cp, inputBytes, input);
+      if (treeResult && treeResult.consumed === inputBytes.length) {
+        return {
+          matched: true,
+          bytes_consumed: treeResult.consumed,
+          tree: treeResult.tree,
+          extracted: treeResult.extracted,
+        } as MatchSuccess;
+      }
       return execute(program, input, true);
     }
   }

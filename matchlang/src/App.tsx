@@ -150,13 +150,13 @@ function Nav({ isDark, onToggle, onSearch }: { isDark: boolean; onToggle: () => 
       <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
         <a href="/#features" className="nav-link">Features</a>
         <a href="/#compare" className="nav-link">Compare</a>
-        <a href="/#pricing" className="nav-link">Pricing</a>
+        <a href="/#pricing" className="nav-link">Support</a>
         <Link to="/docs" className="nav-link" style={{ color: isDocsPage ? T.text : undefined, fontWeight: isDocsPage ? 600 : undefined }}>Docs</Link>
         <Link to="/playground" className="nav-link" style={{ color: location.pathname === '/playground' ? T.text : undefined, fontWeight: location.pathname === '/playground' ? 600 : undefined }}>Playground</Link>
       </div>
       <div style={{ flex: 1 }} />
-      <ShimmerButton href="/#pricing" style={{ padding: '7px 18px', fontSize: 12, borderRadius: 8 }}>
-        Get a license
+      <ShimmerButton href={CONFIG.polar.donateCheckout} style={{ padding: '7px 18px', fontSize: 12, borderRadius: 8 }}>
+        Support Development
       </ShimmerButton>
     </motion.nav>
 
@@ -400,7 +400,7 @@ function Hero() {
               </span>
             </button>
             <motion.a
-              href="#pricing"
+              href={CONFIG.polar.donateCheckout}
               whileTap={{ scale: 0.97 }}
               transition={{ type: 'spring', stiffness: 400, damping: 17 }}
               style={{
@@ -415,7 +415,7 @@ function Hero() {
               }}
               className="license-btn"
             >
-              Get a license
+              Support Development
               <span className="license-arrow" style={{
                 display: 'inline-flex', alignItems: 'center',
                 width: 0, opacity: 0,
@@ -1608,155 +1608,11 @@ function QuickStart() {
   )
 }
 
-const COMPANY_TIERS = [
-  { seats: 10, price: 499 },
-  { seats: 25, price: 999 },
-  { seats: 50, price: 1799 },
-  { seats: 100, price: 2999 },
-  { seats: 500, price: 9999 },
-  { seats: 1000, price: 14999 },
-  { seats: Infinity, price: 24999, label: 'Unlimited' },
-]
-
-function PersonalCard() {
-  const [activated, setActivated] = useState(false)
-
-  const handleClick = (e: React.MouseEvent) => {
-    e.preventDefault()
-    if (activated) return
-    setActivated(true)
-  }
-
-  const t = '0.5s cubic-bezier(0.22, 1, 0.36, 1)'
-
-  return (
-    <BorderBeam beamColor={T.accent} duration={activated ? 2 : 5}>
-      <div style={{
-        padding: 32,
-        background: T.surface,
-        borderRadius: T.radius,
-        position: 'relative',
-      }}>
-        <div style={{
-          fontSize: 12, color: T.accentMuted, fontWeight: 600,
-          letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 16,
-          fontFamily: T.mono,
-          textAlign: activated ? 'center' : 'left',
-          transition: `text-align ${t}`,
-        }}>
-          <span style={{
-            display: 'inline-block',
-            transition: `transform ${t}`,
-          }}>Personal</span>
-        </div>
-        <div style={{
-          fontSize: 44, fontWeight: 700, color: T.text, letterSpacing: '-0.03em',
-          position: 'relative', overflow: 'hidden',
-          height: 53,
-        }}>
-          <span style={{
-            display: 'block',
-            transition: `transform ${t}, opacity ${t}`,
-            transform: activated ? 'translateY(-100%)' : 'translateY(0)',
-            opacity: activated ? 0 : 1,
-          }}>$99</span>
-          <span style={{
-            display: 'block',
-            position: 'absolute', top: 0, left: 0, right: 0,
-            transition: `transform ${t}, opacity ${t}`,
-            transform: activated ? 'translateY(0)' : 'translateY(100%)',
-            opacity: activated ? 1 : 0,
-            textAlign: activated ? 'center' : 'left',
-          }}>Thanks!</span>
-        </div>
-        <div style={{
-          color: T.textMuted, fontSize: 13, marginBottom: 32, fontFamily: T.mono,
-          position: 'relative', overflow: 'hidden',
-          height: 20,
-        }}>
-          <span style={{
-            display: 'block',
-            transition: `transform ${t}, opacity ${t}`,
-            transform: activated ? 'translateY(-100%)' : 'translateY(0)',
-            opacity: activated ? 0 : 1,
-          }}>one-time, yours forever</span>
-          <span style={{
-            display: 'block',
-            position: 'absolute', top: 0, left: 0, right: 0,
-            transition: `transform ${t}, opacity ${t}`,
-            transform: activated ? 'translateY(0)' : 'translateY(100%)',
-            opacity: activated ? 1 : 0,
-            textAlign: activated ? 'center' : 'left',
-          }}>enjoy your purchase :)</span>
-        </div>
-        <ul style={{
-          textAlign: 'left', listStyle: 'none', padding: 0, margin: '0 0 32px',
-          display: 'flex', flexDirection: 'column', gap: 12,
-        }}>
-          {[
-            'Any personal project',
-            'Commercial side projects',
-            'Lifetime updates',
-            'Priority support',
-          ].map(item => (
-            <li key={item} style={{
-              fontSize: 13, color: T.textSecondary,
-              display: 'flex', alignItems: 'baseline', gap: 10,
-            }}>
-              <span style={{ color: T.accentMuted, fontSize: 9 }}>&#9670;</span>
-              {item}
-            </li>
-          ))}
-        </ul>
-        <ShimmerButton
-          onClick={!activated ? handleClick : undefined}
-          href={activated ? CONFIG.polar.personalCheckout : undefined}
-          style={{ width: '100%', textAlign: 'center', display: 'block', padding: '14px 24px' }}
-        >
-          {activated ? 'Continue to checkout' : 'Buy license'}
-        </ShimmerButton>
-        {activated && (
-          <button
-            onClick={() => setActivated(false)}
-            style={{
-              position: 'absolute', top: 12, left: 12,
-              width: 28, height: 28, borderRadius: 6,
-              background: 'none', border: `1px solid ${T.border}`,
-              color: T.textMuted, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              padding: 0, transition: 'border-color 0.2s, color 0.2s',
-            }}
-            className="ghost-btn"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M8.5 3L4.5 7L8.5 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        )}
-      </div>
-    </BorderBeam>
-  )
-}
-
 function Pricing() {
-  const [tierIdx, setTierIdx] = useState(0)
-  const [dropOpen, setDropOpen] = useState(false)
-  const dropRef = useRef<HTMLDivElement>(null)
-  const tier = COMPANY_TIERS[tierIdx]
-
-  useEffect(() => {
-    if (!dropOpen) return
-    const handler = (e: MouseEvent) => {
-      if (dropRef.current && !dropRef.current.contains(e.target as Node)) setDropOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [dropOpen])
-
   return (
     <section id="pricing" style={{
       padding: '128px 24px',
-      maxWidth: 960, margin: '0 auto',
+      maxWidth: 400, margin: '0 auto',
       position: 'relative',
     }}>
       <FadeIn>
@@ -1765,202 +1621,72 @@ function Pricing() {
           color: T.accent, letterSpacing: '0.1em', textTransform: 'uppercase',
           fontWeight: 600, marginBottom: 16,
         }}>
-          Pricing
+          Open Source
         </p>
-        <h2 className="section-heading">Own your software</h2>
-        <p style={{ textAlign: 'center', color: T.textSecondary, fontSize: 15, marginTop: 16, marginBottom: 64 }}>
-          Free for personal, educational, and open-source use.
+        <h2 className="section-heading">Free forever</h2>
+        <p style={{ textAlign: 'center', color: T.textSecondary, fontSize: 15, marginTop: 16, marginBottom: 48, lineHeight: 1.7 }}>
+          Match is fully open-source and free for everyone. If it saves you time, consider supporting its development.
         </p>
       </FadeIn>
 
       <FadeIn delay={0.1}>
-        <div style={{
-          display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
-          gap: 20, maxWidth: 960, margin: '0 auto',
-        }}>
-          <div className="pricing-card" style={{
-            padding: 32,
+        <BorderBeam beamColor={T.accent} duration={5}>
+          <div style={{
+            padding: 40,
             background: T.surface,
-            border: `1px solid ${T.border}`,
             borderRadius: T.radius,
+            textAlign: 'center',
           }}>
             <div style={{
-              fontSize: 12, color: T.textMuted, fontWeight: 600,
-              letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 16,
-              fontFamily: T.mono,
-            }}>Open Source</div>
-            <div style={{ fontSize: 44, fontWeight: 700, color: T.text, letterSpacing: '-0.03em' }}>
-              Free
+              fontSize: 44, fontWeight: 700, color: T.text, letterSpacing: '-0.03em',
+              marginBottom: 8,
+            }}>
+              $0
             </div>
-            <div style={{ color: T.textMuted, fontSize: 13, marginBottom: 32, fontFamily: T.mono }}>forever</div>
+            <div style={{ color: T.textMuted, fontSize: 13, marginBottom: 32, fontFamily: T.mono }}>
+              free &amp; open source
+            </div>
+
             <ul style={{
-              textAlign: 'left', listStyle: 'none', padding: 0, margin: '0 0 32px',
+              listStyle: 'none', padding: 0, margin: '0 auto 40px',
               display: 'flex', flexDirection: 'column', gap: 12,
+              maxWidth: 280,
             }}>
               {[
-                'Open-source projects',
-                'Educational use',
-                'Community support',
                 'Full feature set',
-              ].map(item => (
-                <li key={item} style={{
-                  fontSize: 13, color: T.textSecondary,
-                  display: 'flex', alignItems: 'baseline', gap: 10,
-                }}>
-                  <span style={{ color: T.textFaint, fontSize: 9 }}>◆</span>
-                  {item}
-                </li>
-              ))}
-            </ul>
-            <Link to="/docs" className="ghost-btn" style={{
-              display: 'block', width: '100%', textAlign: 'center',
-              padding: '14px 24px', borderRadius: 10,
-              border: `1px solid ${T.border}`,
-              color: T.textSecondary, fontWeight: 600, fontSize: 14,
-              textDecoration: 'none', transition: 'all 0.2s',
-            }}>
-              Get started
-            </Link>
-          </div>
-
-          <PersonalCard />
-
-          <div className="pricing-card" style={{
-            padding: 32,
-            background: T.surface,
-            border: `1px solid ${T.border}`,
-            borderRadius: T.radius,
-            position: 'relative',
-          }}>
-            <div ref={dropRef} style={{ position: 'absolute', top: 16, right: 16, zIndex: 10 }}>
-              <button
-                onClick={() => setDropOpen(!dropOpen)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  background: T.surface,
-                  border: `1px solid ${dropOpen ? T.borderHover : T.border}`,
-                  borderRadius: 8,
-                  padding: '5px 10px 5px 12px',
-                  fontSize: 11,
-                  fontFamily: T.mono,
-                  fontWeight: 600,
-                  color: T.text,
-                  cursor: 'pointer',
-                  outline: 'none',
-                  transition: 'border-color 0.2s',
-                }}
-              >
-                {tier.label || tier.seats} seats
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{
-                  transition: 'transform 0.2s',
-                  transform: dropOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                }}>
-                  <path d="M2.5 4L5 6.5L7.5 4" stroke={T.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-              <AnimatePresence>
-                {dropOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -4, scale: 0.97 }}
-                    animate={{ opacity: 1, y: 4, scale: 1 }}
-                    exit={{ opacity: 0, y: -4, scale: 0.97 }}
-                    transition={{ duration: 0.15, ease: [0.25, 0.46, 0.45, 0.94] }}
-                    style={{
-                      position: 'absolute', top: '100%', right: 0,
-                      background: T.bg,
-                      border: `1px solid ${T.border}`,
-                      borderRadius: 10,
-                      padding: 4,
-                      minWidth: 140,
-                      boxShadow: `0 8px 32px ${T.accent}10, 0 2px 8px rgba(0,0,0,0.08)`,
-                      backdropFilter: 'blur(12px)',
-                    }}
-                  >
-                    {COMPANY_TIERS.map((t, i) => (
-                      <button
-                        key={t.seats}
-                        onClick={() => { setTierIdx(i); setDropOpen(false) }}
-                        style={{
-                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          width: '100%',
-                          padding: '7px 12px',
-                          border: 'none',
-                          borderRadius: 6,
-                          background: i === tierIdx ? T.accentSurface : 'transparent',
-                          color: i === tierIdx ? T.text : T.textSecondary,
-                          fontSize: 12,
-                          fontFamily: T.mono,
-                          fontWeight: i === tierIdx ? 600 : 400,
-                          cursor: 'pointer',
-                          transition: 'background 0.15s, color 0.15s',
-                          textAlign: 'left',
-                        }}
-                        className="seat-option"
-                      >
-                        <span>{t.label || t.seats} seats</span>
-                        {i === tierIdx && <span style={{ fontSize: 10, color: T.accent }}>&#10003;</span>}
-                      </button>
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-            <div style={{
-              fontSize: 12, color: T.textMuted, fontWeight: 600,
-              letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 16,
-              fontFamily: T.mono,
-            }}>Company</div>
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={tierIdx}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.2 }}
-              >
-                <div style={{ fontSize: 44, fontWeight: 700, color: T.text, letterSpacing: '-0.03em' }}>
-                  ${tier.price.toLocaleString()}
-                </div>
-                <div style={{ color: T.textMuted, fontSize: 13, marginBottom: 32, fontFamily: T.mono }}>
-                  {tier.label ? 'unlimited seats, one-time' : `up to ${tier.seats} seats, one-time`}
-                </div>
-              </motion.div>
-            </AnimatePresence>
-
-            <ul style={{
-              textAlign: 'left', listStyle: 'none', padding: 0, margin: '0 0 32px',
-              display: 'flex', flexDirection: 'column', gap: 12,
-            }}>
-              {[
-                'Organization-wide license',
-                'Unlimited commercial products',
+                'Commercial use allowed',
                 'Lifetime updates',
-                'Priority support + SLA',
+                'Community support',
               ].map(item => (
                 <li key={item} style={{
                   fontSize: 13, color: T.textSecondary,
                   display: 'flex', alignItems: 'baseline', gap: 10,
                 }}>
-                  <span style={{ color: T.textFaint, fontSize: 9 }}>◆</span>
+                  <span style={{ color: T.accentMuted, fontSize: 9 }}>&#9670;</span>
                   {item}
                 </li>
               ))}
             </ul>
-            <a
-              href={CONFIG.polar.companyCheckout[tier.seats]}
-              className="ghost-btn"
-              style={{
-                display: 'block', width: '100%', textAlign: 'center',
-                padding: '14px 24px', borderRadius: 10,
+
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <Link to="/docs" className="ghost-btn" style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                padding: '14px 32px', borderRadius: 10,
                 border: `1px solid ${T.border}`,
                 color: T.textSecondary, fontWeight: 600, fontSize: 14,
                 textDecoration: 'none', transition: 'all 0.2s',
-              }}
-            >
-              Buy license
-            </a>
+              }}>
+                Get started
+              </Link>
+              <ShimmerButton
+                href={CONFIG.polar.donateCheckout}
+                style={{ padding: '14px 32px' }}
+              >
+                Support Development
+              </ShimmerButton>
+            </div>
           </div>
-        </div>
+        </BorderBeam>
       </FadeIn>
     </section>
   )
@@ -2010,8 +1736,8 @@ function CTASection() {
             }} className="ghost-btn">
               View on GitHub
             </a>
-            <ShimmerButton href="#pricing">
-              Get a license
+            <ShimmerButton href={CONFIG.polar.donateCheckout}>
+              Support Development
             </ShimmerButton>
           </div>
         </FadeIn>
@@ -2489,17 +2215,6 @@ export default function App() {
           stroke-dashoffset: 0;
         }
 
-        .seat-option:hover {
-          background: ${T.accentSurface} !important;
-          color: ${T.text} !important;
-        }
-
-        .pricing-card {
-          transition: border-color 0.3s;
-        }
-        .pricing-card:hover {
-          border-color: ${T.borderHover} !important;
-        }
 
         .ghost-btn:hover {
           border-color: ${T.borderHover} !important;
@@ -2571,11 +2286,6 @@ export default function App() {
           .hero-grid > div:first-child > div:first-child { align-self: center !important; }
         }
 
-        @media (max-width: 640px) {
-          section#pricing > div > div > div {
-            grid-template-columns: 1fr !important;
-          }
-        }
       `}</style>
       <Nav isDark={isDark} onToggle={() => setIsDark(d => !d)} onSearch={() => setCmdOpen(true)} />
       <Routes>

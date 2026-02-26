@@ -1189,7 +1189,7 @@ function BenchmarksDoc() {
       <P>Match automatically selects between two execution tiers:</P>
       <Pre label="engine tiers">{`JS JIT     inputs < 64 bytes
 WASM JIT   inputs >= 64 bytes`}</Pre>
-      <P>The <strong>JS JIT</strong> compiles each grammar into a JavaScript function at first use. It emits range checks (<Code>(b-48>>>0){'<'}=9</Code> for digits), case-fold tricks (<Code>(b|32)-97</Code> for letters), 4-byte word comparisons for literals, and fused loops for joined-by patterns. V8 then JIT-compiles this generated JS into machine code.</P>
+      <P>The <strong>JS JIT</strong> compiles each grammar into a JavaScript function at first use. It emits range checks (<Code>(b-48{'>>>'}0){'<'}=9</Code> for digits), case-fold tricks (<Code>(b|32)-97</Code> for letters), 4-byte word comparisons for literals, and fused loops for joined-by patterns. V8 then JIT-compiles this generated JS into machine code.</P>
       <P>The <strong>WASM JIT</strong> compiles each grammar into a WebAssembly module with SIMD acceleration. It uses <Code>i8x16</Code> SIMD to scan 16 bytes per iteration for character classes, 4x unrolled scalar loops as a fallback, range-check inlining for 1-2 range classes, and specialized joined-by codegen that fuses element+separator scanning to avoid per-segment overhead.</P>
       <P>Both tiers fall back to a bytecode interpreter if the JIT cannot handle the pattern (e.g., recursive grammars with memoization).</P>
 
@@ -1244,7 +1244,7 @@ HTTP header line             1.3x`}</Pre>
       <Pre label="examples">{`nested parens                10x+
 multi-rule URL path+query    5x`}</Pre>
       <Note>The recursive grammar cases are patterns that <em>cannot</em> be expressed as regular expressions. The comparison is against a hand-written non-recursive regex approximation.</Note>
-      <P><strong>First-byte WASM failure</strong> — When the WASM path is selected (input >= 64 bytes) but the match fails on the first byte, the WASM module instantiation overhead dominates. Regex has no such setup cost.</P>
+      <P><strong>First-byte WASM failure</strong> — When the WASM path is selected (input {'>='}  64 bytes) but the match fails on the first byte, the WASM module instantiation overhead dominates. Regex has no such setup cost.</P>
       <Pre label="examples">{`FAIL: early mismatch         1.6x
 STRESS FAIL early (50k)      39x`}</Pre>
 
