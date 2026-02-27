@@ -1,4 +1,4 @@
-import { Op, FlatOp, CompiledOp, CompiledProgram, opToBitset, isSingleByteOp, FlatStep } from './fast-types.js';
+import { Op, FlatOp, CompiledOp, CompiledProgram, opToBitset, isSingleByteOp, FlatStep, makeBitset } from './fast-types.js';
 
 const I32 = 0x7F;
 const I32_CONST = 0x41;
@@ -30,6 +30,7 @@ const RETURN = 0x0F;
 const CALL = 0x10;
 const VOID = 0x40;
 const I32_LOAD16_U = 0x2F;
+const I32_STORE = 0x36;
 const I32_OR = 0x72;
 const I32_XOR = 0x73;
 const I32_GE_U = 0x4F;
@@ -52,6 +53,9 @@ const I8X16_EQ = 35;
 const I32X4_EXTRACT_LANE = 27;
 const I8X16_NE = 36;
 const I8X16_SHR_U = 109;
+const V128_ANY_TRUE = 83;
+const I8X16_BITMASK = 0x64;
+const I32_CTZ = 0x68;
 
 const L_PTR = 0;
 const L_LEN = 1;
@@ -1192,6 +1196,193 @@ function uleb(v: number): number[] { const o: number[] = []; do { let b = v & 0x
 function sleb(v: number): number[] { const o: number[] = []; let m = true; while (m) { let b = v & 0x7F; v >>= 7; if ((v === 0 && (b & 0x40) === 0) || (v === -1 && (b & 0x40) !== 0)) m = false; else b |= 0x80; o.push(b); } return o; }
 function sec(id: number, c: number[]): number[] { return [id, ...uleb(c.length), ...c]; }
 
+const S_PTR = 0;
+const S_LEN = 1;
+const S_OUT = 2;
+const S_POS = 3;
+const S_CNT = 4;
+const S_RES = 5;
+const S_TMP = 6;
+const S_VEC = 7;
+
+interface SecondaryAnchor {
+  byte: number;
+  minOff: number;
+  maxOff: number;
+}
+
+function extractSecondaryAnchor(op: CompiledOp, cp: CompiledProgram): SecondaryAnchor | null {
+  if (op.op === Op.FAST_SEQ_FLAT && op.flatSteps && op.flatSteps.length >= 2) {
+    const s0 = op.flatSteps[0];
+    const s1 = op.flatSteps[1];
+    let minOff = 0, maxOff = 0;
+    if (s0.fop === FlatOp.F_BETWEEN_BITSET || s0.fop === FlatOp.F_REPEAT_BITSET) {
+      minOff = s0.min ?? 1;
+      maxOff = s0.max ?? 255;
+    } else if (s0.fop === FlatOp.F_EXACTLY_BITSET) {
+      minOff = maxOff = s0.min ?? 1;
+    } else if (s0.fop === FlatOp.F_BITSET || s0.fop === FlatOp.F_BYTE) {
+      minOff = maxOff = 1;
+    } else {
+      return null;
+    }
+    if (s1.fop === FlatOp.F_BYTE && s1.byte !== undefined && maxOff <= 16) {
+      return { byte: s1.byte, minOff, maxOff };
+    }
+    if (s1.fop === FlatOp.F_SEQ_BYTES && s1.textBytes && s1.textBytes.length > 0 && maxOff <= 16) {
+      return { byte: s1.textBytes[0], minOff, maxOff };
+    }
+  }
+  if (op.op === Op.FAST_SEQ2 || op.op === Op.FAST_SEQ3) {
+    const c0 = op.child!;
+    const c1 = op.child2!;
+    let minOff = 0, maxOff = 0;
+    if (c0.op === Op.FAST_BETWEEN_BITSET || c0.op === Op.FAST_REPEAT_BITSET) {
+      minOff = c0.min ?? 1;
+      maxOff = c0.max ?? 255;
+    } else if (c0.op === Op.FAST_EXACTLY_BITSET) {
+      minOff = maxOff = c0.min ?? 1;
+    } else if (isSingleByteOp(c0)) {
+      minOff = maxOff = 1;
+    } else {
+      return null;
+    }
+    if (c1.op === Op.BYTE && c1.byte !== undefined && maxOff <= 16) {
+      return { byte: c1.byte, minOff, maxOff };
+    }
+    if (c1.op === Op.TEXT && c1.textBytes && c1.textBytes.length > 0 && maxOff <= 16) {
+      return { byte: c1.textBytes[0], minOff, maxOff };
+    }
+  }
+  if (op.op === Op.RULE_REF && op.ruleIdx !== undefined && op.ruleIdx >= 0 && op.ruleIdx < cp.rules.length) {
+    return extractSecondaryAnchor(cp.rules[op.ruleIdx], cp);
+  }
+  return null;
+}
+
+function emitScanBody(
+  e: E, cp: CompiledProgram, rules: CompiledOp[], ei: number, rfi: Map<number, number>,
+): number[] {
+  const sw = new E();
+  sw.simd = e.simd;
+
+  const lead = opLeadBitset(rules[ei], cp);
+  let leadOff = -1;
+  if (lead) leadOff = e.allocBs(lead);
+  const anchor = extractSecondaryAnchor(rules[ei], cp);
+  const useScanSimd = e.simd && lead !== null;
+
+  if (useScanSimd) {
+    sw.u(2); sw.u(4); sw.b(I32); sw.u(1); sw.b(V128);
+  } else {
+    sw.u(1); sw.u(4); sw.b(I32);
+  }
+
+  iconst(sw, 0); lset(sw, S_POS);
+  iconst(sw, 0); lset(sw, S_CNT);
+
+  sw.b(BLOCK); sw.b(VOID);
+  sw.b(LOOP); sw.b(VOID);
+
+  lget(sw, S_POS); lget(sw, S_LEN); sw.b(I32_GE_S);
+  sw.b(BR_IF); sw.u(1);
+
+  if (lead && leadOff >= 0) {
+    if (useScanSimd) {
+      sw.b(BLOCK); sw.b(VOID);
+      sw.b(LOOP); sw.b(VOID);
+      lget(sw, S_POS); iconst(sw, 16); sw.b(I32_ADD); lget(sw, S_LEN); sw.b(I32_GT_S);
+      sw.b(BR_IF); sw.u(1);
+      lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+      simdOp(sw, V128_LOAD); sw.u(2); sw.u(0);
+      emitSimdBsCheck16(sw, lead);
+      simdOp(sw, I8X16_BITMASK);
+      lset(sw, S_TMP);
+      lget(sw, S_TMP); iconst(sw, 0); sw.b(I32_EQ);
+      sw.b(IF); sw.b(VOID);
+      lget(sw, S_POS); iconst(sw, 16); sw.b(I32_ADD); lset(sw, S_POS);
+      sw.b(BR); sw.u(1);
+      sw.b(END);
+      lget(sw, S_POS); lget(sw, S_TMP); sw.b(I32_CTZ); sw.b(I32_ADD); lset(sw, S_POS);
+      sw.b(END);
+      sw.b(END);
+
+      lget(sw, S_POS); lget(sw, S_LEN); sw.b(I32_GE_S);
+      sw.b(BR_IF); sw.u(1);
+    } else {
+      lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+      sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+      lset(sw, S_RES);
+
+      lget(sw, S_RES); iconst(sw, 5); sw.b(I32_SHR_U); iconst(sw, 2); sw.b(I32_SHL);
+      iconst(sw, leadOff); sw.b(I32_ADD);
+      sw.b(I32_LOAD); sw.u(2); sw.u(0);
+      iconst(sw, 1); lget(sw, S_RES); iconst(sw, 31); sw.b(I32_AND); sw.b(I32_SHL);
+      sw.b(I32_AND);
+
+      iconst(sw, 0); sw.b(I32_EQ);
+      sw.b(IF); sw.b(VOID);
+      lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+      sw.b(BR); sw.u(1);
+      sw.b(END);
+    }
+  }
+
+  if (anchor) {
+    iconst(sw, 0); lset(sw, S_TMP);
+    for (let off = anchor.minOff; off <= anchor.maxOff; off++) {
+      lget(sw, S_POS); iconst(sw, off); sw.b(I32_ADD); lget(sw, S_LEN); sw.b(I32_GE_S);
+      sw.b(IF); sw.b(VOID);
+      sw.b(ELSE);
+      lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+      iconst(sw, off); sw.b(I32_ADD);
+      sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+      iconst(sw, anchor.byte); sw.b(I32_EQ);
+      lget(sw, S_TMP); sw.b(I32_OR); lset(sw, S_TMP);
+      sw.b(END);
+    }
+    lget(sw, S_TMP); iconst(sw, 0); sw.b(I32_EQ);
+    sw.b(IF); sw.b(VOID);
+    lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(BR); sw.u(1);
+    sw.b(END);
+  }
+
+  lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+  lget(sw, S_LEN); lget(sw, S_POS); sw.b(I32_SUB);
+  sw.b(CALL); sw.u(0);
+  lset(sw, S_RES);
+
+  lget(sw, S_RES); iconst(sw, 0); sw.b(I32_GT_S);
+  sw.b(IF); sw.b(VOID);
+
+  lget(sw, S_OUT); lget(sw, S_CNT); iconst(sw, 3); sw.b(I32_SHL); sw.b(I32_ADD);
+  lget(sw, S_POS);
+  sw.b(I32_STORE); sw.u(2); sw.u(0);
+
+  lget(sw, S_OUT); lget(sw, S_CNT); iconst(sw, 3); sw.b(I32_SHL); sw.b(I32_ADD);
+  lget(sw, S_POS); lget(sw, S_RES); sw.b(I32_ADD);
+  sw.b(I32_STORE); sw.u(2); sw.u(4);
+
+  lget(sw, S_CNT); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_CNT);
+  lget(sw, S_POS); lget(sw, S_RES); sw.b(I32_ADD); lset(sw, S_POS);
+
+  sw.b(ELSE);
+
+  lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+
+  sw.b(END);
+
+  sw.b(BR); sw.u(0);
+  sw.b(END);
+  sw.b(END);
+
+  lget(sw, S_CNT);
+  sw.b(END);
+
+  return sw.buf;
+}
+
 let _simdSupported: boolean | null = null;
 function simdSupported(): boolean {
   if (_simdSupported !== null) return _simdSupported;
@@ -1259,11 +1450,19 @@ export function emitWasmBinary(cp: CompiledProgram, useSimd?: boolean): Uint8Arr
     }
   }
 
+  const scanBody = emitScanBody(e, cp, rules, ei, rfi);
+  bodies.push(scanBody);
+  const scanFnIdx = fc;
+  fc++;
+
   const ts: number[] = [2, 0x60, 2, I32, I32, 1, I32, 0x60, 3, I32, I32, I32, 1, I32];
-  const fs: number[] = [fc]; fs.push(0); for (let i = 1; i < fc; i++) fs.push(1);
-  const es: number[] = [2, 5, 0x6D, 0x61, 0x74, 0x63, 0x68, 0x00, 0, 6, 0x6D, 0x65, 0x6D, 0x6F, 0x72, 0x79, 0x02, 0];
+  const fs: number[] = [fc]; fs.push(0); for (let i = 1; i < fc - 1; i++) fs.push(1); fs.push(1);
+  const es: number[] = [3,
+    5, 0x6D, 0x61, 0x74, 0x63, 0x68, 0x00, 0,
+    4, 0x73, 0x63, 0x61, 0x6E, 0x00, scanFnIdx,
+    6, 0x6D, 0x65, 0x6D, 0x6F, 0x72, 0x79, 0x02, 0];
   const pages = Math.max(1, Math.ceil(e.dOff / 65536) + 2);
-  const ms: number[] = [1, 0x01, ...uleb(pages), ...uleb(256)];
+  const ms: number[] = [1, 0x01, ...uleb(pages), ...uleb(1024)];
 
   const cs: number[] = [bodies.length];
   for (const b of bodies) cs.push(...uleb(b.length), ...b);
@@ -1289,6 +1488,7 @@ export function jitCompile(cp: CompiledProgram): { module: WebAssembly.Module; i
 interface JitCached {
   memory: WebAssembly.Memory;
   matchFn: (ptr: number, len: number) => number;
+  scanFn: (ptr: number, len: number, outPtr: number) => number;
   view: Uint8Array;
   inputView: Uint8Array;
   bufLen: number;
@@ -1306,9 +1506,10 @@ function ensureJit(cp: CompiledProgram): JitCached | null {
       const { instance } = jitCompile(cp);
       const memory = instance.exports.memory as WebAssembly.Memory;
       const matchFn = instance.exports.match as (ptr: number, len: number) => number;
+      const scanFn = instance.exports.scan as (ptr: number, len: number, outPtr: number) => number;
       const view = new Uint8Array(memory.buffer);
       const inputView = view.subarray(INPUT_BASE);
-      cached = { memory, matchFn, view, inputView, bufLen: memory.buffer.byteLength };
+      cached = { memory, matchFn, scanFn, view, inputView, bufLen: memory.buffer.byteLength };
       jitCache.set(cp, cached);
     } catch {
       return null;
@@ -1348,4 +1549,253 @@ export function jitMatchString(cp: CompiledProgram, input: string): number {
   if (consumed === written) return slen;
   if (consumed < 0) return consumed;
   return consumed;
+}
+
+export interface ScanMatch {
+  start: number;
+  end: number;
+  text: string;
+}
+
+const SCAN_OUT_BASE = 32;
+
+export function jitScan(cp: CompiledProgram, input: Uint8Array, inputStr: string): ScanMatch[] | null {
+  const cached = ensureJit(cp);
+  if (!cached) return null;
+  const len = input.length;
+  const maxResults = Math.min(len, 1000000);
+  const outBytes = maxResults * 8;
+  if (!ensureCapacity(cached, len + outBytes)) return null;
+  cached.view.set(input, INPUT_BASE);
+  const outPtr = INPUT_BASE + len + 16;
+  const count = cached.scanFn(INPUT_BASE, len, outPtr);
+  const ascii = len === inputStr.length;
+  const charOffsets = ascii ? null : buildByteToCharOffset(inputStr, input);
+  const dv = new DataView(cached.memory.buffer);
+  const results: ScanMatch[] = [];
+  for (let i = 0; i < count; i++) {
+    const base = outPtr + i * 8;
+    const byteStart = dv.getInt32(base, true);
+    const byteEnd = dv.getInt32(base + 4, true);
+    const charStart = charOffsets ? charOffsets[byteStart] : byteStart;
+    const charEnd = charOffsets ? charOffsets[byteEnd] : byteEnd;
+    results.push({ start: charStart, end: charEnd, text: inputStr.slice(charStart, charEnd) });
+  }
+  return results;
+}
+
+export function jitScanString(cp: CompiledProgram, inputStr: string): ScanMatch[] | null {
+  const cached = ensureJit(cp);
+  if (!cached) return null;
+  const slen = inputStr.length;
+  if (!ensureCapacity(cached, slen * 3 + 800016)) return null;
+  const { written } = jitEnc.encodeInto(inputStr, cached.inputView);
+  const len = written!;
+  const outPtr = INPUT_BASE + len + 16;
+  const count = cached.scanFn(INPUT_BASE, len, outPtr);
+  const ascii = len === slen;
+  const dv = new DataView(cached.memory.buffer);
+  const results: ScanMatch[] = [];
+  if (ascii) {
+    for (let i = 0; i < count; i++) {
+      const base = outPtr + i * 8;
+      const s = dv.getInt32(base, true);
+      const e = dv.getInt32(base + 4, true);
+      results.push({ start: s, end: e, text: inputStr.slice(s, e) });
+    }
+  } else if (count > 0) {
+    const offsets = new Int32Array(count * 2);
+    for (let i = 0; i < count; i++) {
+      const base = outPtr + i * 8;
+      offsets[i * 2] = dv.getInt32(base, true);
+      offsets[i * 2 + 1] = dv.getInt32(base + 4, true);
+    }
+    const charMap = resolveByteOffsets(inputStr, offsets);
+    for (let i = 0; i < count; i++) {
+      const charStart = charMap[i * 2];
+      const charEnd = charMap[i * 2 + 1];
+      results.push({ start: charStart, end: charEnd, text: inputStr.slice(charStart, charEnd) });
+    }
+  }
+  return results;
+}
+
+export interface ByteScanMatch {
+  start: number;
+  end: number;
+}
+
+export function jitScanBytes(cp: CompiledProgram, input: Uint8Array): ByteScanMatch[] | null {
+  const cached = ensureJit(cp);
+  if (!cached) return null;
+  const len = input.length;
+  const outBytes = Math.min(len, 1000000) * 8;
+  if (!ensureCapacity(cached, len + outBytes)) return null;
+  cached.view.set(input, INPUT_BASE);
+  const outPtr = INPUT_BASE + len + 16;
+  const count = cached.scanFn(INPUT_BASE, len, outPtr);
+  const dv = new DataView(cached.memory.buffer);
+  const results: ByteScanMatch[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const base = outPtr + i * 8;
+    results[i] = { start: dv.getInt32(base, true), end: dv.getInt32(base + 4, true) };
+  }
+  return results;
+}
+
+function extractLeadBitset(cp: CompiledProgram): Uint32Array | null {
+  return opLeadBitset(cp.rules[cp.entryIdx], cp);
+}
+
+function canMatchEmpty(op: CompiledOp, cp: CompiledProgram): boolean {
+  switch (op.op) {
+    case Op.REP_ZERO_OR_MORE: case Op.REP_OPTIONAL: return true;
+    case Op.REP_BETWEEN: case Op.FAST_BETWEEN_BITSET: return (op.min ?? 0) === 0;
+    case Op.SEQ: return (op.children ?? []).every(c => canMatchEmpty(c, cp));
+    case Op.FAST_SEQ2: return canMatchEmpty(op.child!, cp) && canMatchEmpty(op.child2!, cp);
+    case Op.FAST_SEQ3: return canMatchEmpty(op.child!, cp) && canMatchEmpty(op.child2!, cp) && canMatchEmpty(op.child3!, cp);
+    case Op.ALT: case Op.FAST_ALT_BYTE_FIRST: case Op.FAST_ALT_LEAD_DISPATCH:
+      return (op.children ?? []).some(c => canMatchEmpty(c, cp));
+    case Op.RULE_REF:
+      if (op.ruleIdx !== undefined && op.ruleIdx >= 0 && op.ruleIdx < cp.rules.length)
+        return canMatchEmpty(cp.rules[op.ruleIdx], cp);
+      return false;
+    case Op.EXTRACT: return op.child ? canMatchEmpty(op.child, cp) : false;
+    case Op.FAST_REPEAT_BITSET: return (op.min ?? 0) === 0;
+    default: return false;
+  }
+}
+
+function seqLeadBitset(elements: CompiledOp[], cp: CompiledProgram): Uint32Array | null {
+  const merged = new Uint32Array(8);
+  for (const el of elements) {
+    const bs = opLeadBitset(el, cp);
+    if (!bs) return null;
+    for (let i = 0; i < 8; i++) merged[i] |= bs[i];
+    if (!canMatchEmpty(el, cp)) return merged;
+  }
+  return merged;
+}
+
+function opLeadBitset(op: CompiledOp, cp: CompiledProgram): Uint32Array | null {
+  const bs = opToBitset(op);
+  if (bs) return bs;
+  switch (op.op) {
+    case Op.SEQ:
+    case Op.FAST_SEQ2:
+    case Op.FAST_SEQ3:
+    case Op.FAST_SEQ_FLAT: {
+      if (op.op === Op.FAST_SEQ2 || op.op === Op.FAST_SEQ3) {
+        const els = [op.child!, op.child2!];
+        if (op.op === Op.FAST_SEQ3) els.push(op.child3!);
+        return seqLeadBitset(els, cp);
+      }
+      if (op.op === Op.FAST_SEQ_FLAT) {
+        const flatEls: CompiledOp[] = [];
+        if (op.flatSteps) for (const st of op.flatSteps) {
+          if (st.child) flatEls.push(st.child);
+          else if (st.bitset) flatEls.push({ op: Op.BITSET, bitset: st.bitset } as CompiledOp);
+          else if (st.textBytes && st.textBytes.length > 0) flatEls.push({ op: Op.TEXT, textBytes: st.textBytes } as CompiledOp);
+          else if (st.byte !== undefined) flatEls.push({ op: Op.BYTE, byte: st.byte } as CompiledOp);
+          else return null;
+        }
+        if (op.flatTail) flatEls.push(...op.flatTail);
+        if (flatEls.length > 0) return seqLeadBitset(flatEls, cp);
+      }
+      if (op.children && op.children.length > 0) return seqLeadBitset(op.children, cp);
+      return null;
+    }
+    case Op.REP_ONE_OR_MORE:
+    case Op.REP_ZERO_OR_MORE:
+    case Op.REP_OPTIONAL:
+    case Op.REP_EXACTLY:
+    case Op.REP_BETWEEN:
+      return opLeadBitset(op.child!, cp);
+    case Op.FAST_REPEAT_BITSET:
+    case Op.FAST_EXACTLY_BITSET:
+    case Op.FAST_BETWEEN_BITSET:
+      return op.bitset || null;
+    case Op.FAST_JOINED_BITSET_BYTE:
+    case Op.FAST_JOINED_BYTE:
+      return op.bitset || (op.child ? opLeadBitset(op.child, cp) : null);
+    case Op.JOINED_BY:
+    case Op.JOINED_BY_LENIENT:
+      return op.child ? opLeadBitset(op.child, cp) : null;
+    case Op.ALT:
+    case Op.FAST_ALT_BYTE_FIRST:
+    case Op.FAST_ALT_LEAD_DISPATCH: {
+      if (op.bitset) return op.bitset;
+      if (op.children) {
+        const merged = new Uint32Array(8);
+        for (const c of op.children) {
+          const cb = opLeadBitset(c, cp);
+          if (!cb) return null;
+          for (let i = 0; i < 8; i++) merged[i] |= cb[i];
+        }
+        return merged;
+      }
+      return null;
+    }
+    case Op.RULE_REF: {
+      if (op.ruleIdx !== undefined && op.ruleIdx >= 0 && op.ruleIdx < cp.rules.length) {
+        return opLeadBitset(cp.rules[op.ruleIdx], cp);
+      }
+      return null;
+    }
+    case Op.TEXT:
+    case Op.FAST_SEQ_BYTES:
+      if (op.textBytes && op.textBytes.length > 0) return makeBitset([op.textBytes[0]]);
+      return null;
+    case Op.EXTRACT:
+      return op.child ? opLeadBitset(op.child, cp) : null;
+    case Op.FAST_REP_BITSET_ALT:
+      return op.bitset || null;
+  }
+  return null;
+}
+
+function resolveByteOffsets(str: string, byteOffsets: Int32Array): Int32Array {
+  const n = byteOffsets.length;
+  const sorted = new Int32Array(n);
+  for (let i = 0; i < n; i++) sorted[i] = i;
+  sorted.sort((a, b) => byteOffsets[a] - byteOffsets[b]);
+  const result = new Int32Array(n);
+  let bi = 0;
+  let ci = 0;
+  let si = 0;
+  while (si < n && byteOffsets[sorted[si]] <= 0) {
+    result[sorted[si]] = 0;
+    si++;
+  }
+  for (; ci < str.length && si < n; ci++) {
+    const code = str.charCodeAt(ci);
+    if (code < 0x80) bi += 1;
+    else if (code < 0x800) bi += 2;
+    else if (code >= 0xD800 && code <= 0xDBFF) { bi += 4; ci++; }
+    else bi += 3;
+    while (si < n && byteOffsets[sorted[si]] <= bi) {
+      result[sorted[si]] = ci + 1;
+      si++;
+    }
+  }
+  while (si < n) {
+    result[sorted[si]] = str.length;
+    si++;
+  }
+  return result;
+}
+
+function buildByteToCharOffset(str: string, bytes: Uint8Array): Uint32Array {
+  const map = new Uint32Array(bytes.length + 1);
+  let bi = 0;
+  for (let ci = 0; ci < str.length; ci++) {
+    map[bi] = ci;
+    const code = str.charCodeAt(ci);
+    if (code < 0x80) bi += 1;
+    else if (code < 0x800) bi += 2;
+    else if (code >= 0xD800 && code <= 0xDBFF) { bi += 4; ci++; }
+    else bi += 3;
+  }
+  map[bi] = str.length;
+  return map;
 }

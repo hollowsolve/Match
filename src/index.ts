@@ -1,9 +1,10 @@
 import { lex } from './lexer/lexer.js';
 import { parse as parseTokens } from './parser/parser.js';
 import { validate } from './validator/validator.js';
-import { execute, executePartial } from './executor/executor.js';
+import { execute, executePartial, find as findFn } from './executor/executor.js';
 import { compile, fastMatch, CompiledProgram } from './executor/fast.js';
-import { wasmFastMatchString, vmMatchTree } from './executor/wasm.js';
+import { wasmFastMatchString, vmMatchTree, fastScan, fastScanBytes } from './executor/wasm.js';
+import type { ScanMatch, ByteScanMatch } from './executor/wasm.js';
 import { formatFailure, formatTree } from './diagnostics/formatter.js';
 import { MatchProgram, ParseOptions, RuleNode, UseNode } from './types/ast.js';
 import { MatchResult, MatchSuccess, PartialResult } from './types/result.js';
@@ -19,6 +20,7 @@ export { compile, fastMatch, CompiledProgram } from './executor/fast.js';
 export { LineMatch, SearchError, SearchResult, SearchOptions, StreamSearchOptions, searchString, searchFile, searchFolder, searchFolderStream, searchStream, searchFileStream, formatSearchResults } from './search/search.js';
 export { vmMatch, vmMatchString } from './executor/vm-exec.js';
 export { vmCompile } from './executor/vm-compile.js';
+export type { ScanMatch, ByteScanMatch } from './executor/wasm.js';
 
 // @api-parse
 // Compiles the grammar into an AST and attaches a bytecode CompiledProgram
@@ -195,3 +197,15 @@ export function tryParse(source: string, input: string, options?: ParseOptions):
   return executePartial(program, input);
 }
 // @api-try-parse-end
+
+export function scan(program: MatchProgram, input: string): ScanMatch[] {
+  const cp: CompiledProgram | undefined = (program as any).__compiled;
+  if (cp) return fastScan(cp, input);
+  return findFn(program, input).map((m: { start: number; end: number; text: string }) => ({ start: m.start, end: m.end, text: m.text }));
+}
+
+export function scanBytes(program: MatchProgram, input: Uint8Array): ByteScanMatch[] {
+  const cp: CompiledProgram | undefined = (program as any).__compiled;
+  if (cp) return fastScanBytes(cp, input);
+  return [];
+}
