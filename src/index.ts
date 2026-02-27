@@ -198,14 +198,54 @@ export function tryParse(source: string, input: string, options?: ParseOptions):
 }
 // @api-try-parse-end
 
-export function scan(program: MatchProgram, input: string): ScanMatch[] {
-  const cp: CompiledProgram | undefined = (program as any).__compiled;
-  if (cp) return fastScan(cp, input);
-  return findFn(program, input).map((m: { start: number; end: number; text: string }) => ({ start: m.start, end: m.end, text: m.text }));
+export interface ScanOptions {
+  tree?: boolean;
 }
 
-export function scanBytes(program: MatchProgram, input: Uint8Array): ByteScanMatch[] {
+function offsetTree(tree: import('./types/result.js').RuleMatch, base: number): import('./types/result.js').RuleMatch {
+  return {
+    rule: tree.rule,
+    start: tree.start + base,
+    end: tree.end + base,
+    text: tree.text,
+    children: tree.children.map(c => offsetTree(c, base)),
+  };
+}
+
+export function scan(program: MatchProgram, input: string, options?: ScanOptions): ScanMatch[] {
   const cp: CompiledProgram | undefined = (program as any).__compiled;
-  if (cp) return fastScanBytes(cp, input);
-  return [];
+  let results: ScanMatch[];
+  if (cp) {
+    results = fastScan(cp, input);
+  } else {
+    results = findFn(program, input).map((m: { start: number; end: number; text: string }) => ({ start: m.start, end: m.end, text: m.text }));
+  }
+  if (options?.tree) {
+    for (const r of results) {
+      const slice = input.slice(r.start, r.end);
+      const res = execute(program, slice, true);
+      if (res.matched) r.tree = offsetTree(res.tree, r.start);
+    }
+  }
+  return results;
+}
+
+const scanDec = new TextDecoder();
+
+export function scanBytes(program: MatchProgram, input: Uint8Array, options?: ScanOptions): ByteScanMatch[] {
+  const cp: CompiledProgram | undefined = (program as any).__compiled;
+  let results: ByteScanMatch[];
+  if (cp) {
+    results = fastScanBytes(cp, input);
+  } else {
+    results = [];
+  }
+  if (options?.tree) {
+    for (const r of results) {
+      const slice = scanDec.decode(input.subarray(r.start, r.end));
+      const res = execute(program, slice, true);
+      if (res.matched) r.tree = offsetTree(res.tree, r.start);
+    }
+  }
+  return results;
 }

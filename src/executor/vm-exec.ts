@@ -1513,12 +1513,31 @@ function rebuildTree(
         break;
       }
       case 2: {
-        if (stack.length > 0) {
-          stack[stack.length - 1].isExtract = true;
-        }
+        stack.push({ ruleIdx: -1, startPos: pos, children: [], isExtract: true });
         break;
       }
       case 3: {
+        if (stack.length === 0) break;
+        const entry = stack.pop()!;
+        const cStart = charPos(entry.startPos);
+        const cEnd = charPos(pos);
+        const text = inputStr.slice(cStart, cEnd);
+        let node: RuleMatch;
+        if (entry.children.length === 1 && entry.children[0].start === cStart && entry.children[0].end === cEnd) {
+          node = entry.children[0];
+        } else {
+          node = {
+            rule: '<extract>',
+            start: cStart,
+            end: cEnd,
+            text,
+            children: entry.children,
+          };
+        }
+        if (stack.length > 0) {
+          stack[stack.length - 1].children.push(node);
+        }
+        extracted.push(node);
         break;
       }
     }

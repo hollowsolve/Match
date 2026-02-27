@@ -284,6 +284,13 @@ function emitRepeatChild(w: BytecodeWriter, child: CompiledOp, min: number, max:
 }
 
 function emitOp(w: BytecodeWriter, op: CompiledOp, rules: CompiledOp[], cp: CompiledProgram, callableRules: Set<number>, treeMode = false): void {
+  if (treeMode && op.inlinedRuleIdx !== undefined) {
+    w.emitRuleEnter(op.inlinedRuleIdx);
+    const stripped: CompiledOp = { ...op, inlinedRuleIdx: undefined };
+    emitOp(w, stripped, rules, cp, callableRules, treeMode);
+    w.emitRuleExit();
+    return;
+  }
   switch (op.op) {
     case Op.BYTE:
     case Op.BYTE_RANGE:
@@ -752,7 +759,7 @@ export function vmCompile(cp: CompiledProgram): VmProgram {
 
 export function vmCompileTree(cp: CompiledProgram): VmProgram {
   const w = new BytecodeWriter();
-  const rules = cp.rules;
+  const rules = cp.treeRules ?? cp.rules;
   const callableRules = findCallableRules(rules, cp.entryIdx);
 
   const ruleBodyWriters = new Map<number, BytecodeWriter>();

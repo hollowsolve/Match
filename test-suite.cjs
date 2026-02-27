@@ -1,4 +1,4 @@
-const { run, parse, match, tryParse, formatFailure, formatTree, find, searchString, searchFile, searchFolder, formatSearchResults } = require('./dist/cjs/index.js');
+const { run, parse, match, tryParse, formatFailure, formatTree, find, searchString, searchFile, searchFolder, formatSearchResults, scan, scanBytes } = require('./dist/cjs/index.js');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -2572,6 +2572,43 @@ main: foo
 test('use: grammar without use statements still works with options', () => {
   const result = run('main: one or more digits', '123', { resolve: {} });
   assert(result.matched === true, 'Should work normally');
+});
+
+// ============================================================
+// Scan tree option
+// ============================================================
+
+test('scan with tree: true returns parse trees', () => {
+  const program = parse('main: one or more digits');
+  const results = scan(program, 'abc 123 def 456 ghi');
+  assert(results.length === 2, `Expected 2 matches, got ${results.length}`);
+  assert(results[0].text === '123', `Expected "123", got "${results[0].text}"`);
+  assert(results[0].tree === undefined, 'tree should be undefined without option');
+
+  const resultsWithTree = scan(program, 'abc 123 def 456 ghi', { tree: true });
+  assert(resultsWithTree.length === 2, `Expected 2 matches with tree, got ${resultsWithTree.length}`);
+  assert(resultsWithTree[0].text === '123', `Expected "123", got "${resultsWithTree[0].text}"`);
+  assert(resultsWithTree[0].tree !== undefined, 'tree should be defined with tree: true');
+  assert(resultsWithTree[1].tree !== undefined, 'second result tree should be defined');
+});
+
+test('scan with tree: false does not return parse trees', () => {
+  const program = parse('main: one or more digits');
+  const results = scan(program, 'abc 123 def', { tree: false });
+  assert(results.length === 1, `Expected 1 match, got ${results.length}`);
+  assert(results[0].tree === undefined, 'tree should be undefined with tree: false');
+});
+
+test('scanBytes with tree: true returns parse trees', () => {
+  const program = parse('main: one or more digits');
+  const input = new TextEncoder().encode('abc 123 def 456');
+  const results = scanBytes(program, input);
+  assert(results.length === 2, `Expected 2 byte matches, got ${results.length}`);
+  assert(results[0].tree === undefined, 'tree should be undefined without option');
+
+  const resultsWithTree = scanBytes(program, input, { tree: true });
+  assert(resultsWithTree.length === 2, `Expected 2 byte matches with tree, got ${resultsWithTree.length}`);
+  assert(resultsWithTree[0].tree !== undefined, 'tree should be defined with tree: true');
 });
 
 // ============================================================

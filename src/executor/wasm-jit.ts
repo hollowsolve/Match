@@ -1211,6 +1211,319 @@ interface SecondaryAnchor {
   maxOff: number;
 }
 
+interface SepAnchorPattern {
+  sepByte: number;
+  segCount: number;
+  segments: { bitset: Uint32Array; min: number; max: number }[];
+}
+
+function detectSepAnchorPattern(op: CompiledOp, cp: CompiledProgram): SepAnchorPattern | null {
+  let root = op;
+  if (root.op === Op.RULE_REF && root.ruleIdx !== undefined && root.ruleIdx >= 0 && root.ruleIdx < cp.rules.length) {
+    root = cp.rules[root.ruleIdx];
+  }
+  if (root.op !== Op.FAST_SEQ_FLAT || !root.flatSteps || root.flatSteps.length < 3) return null;
+  const steps = root.flatSteps;
+  if (steps.length % 2 !== 1) return null;
+  const segCount = (steps.length + 1) / 2;
+  if (segCount < 2 || segCount > 8) return null;
+  let sepByte: number | undefined;
+  const segments: { bitset: Uint32Array; min: number; max: number }[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    if (i % 2 === 0) {
+      const s = steps[i];
+      if (s.fop === FlatOp.F_BETWEEN_BITSET && s.bitset && s.min !== undefined && s.max !== undefined) {
+        segments.push({ bitset: s.bitset, min: s.min, max: s.max });
+      } else if (s.fop === FlatOp.F_REPEAT_BITSET && s.bitset) {
+        segments.push({ bitset: s.bitset, min: s.min ?? 1, max: s.max ?? 255 });
+      } else if (s.fop === FlatOp.F_EXACTLY_BITSET && s.bitset && s.min !== undefined) {
+        segments.push({ bitset: s.bitset, min: s.min, max: s.min });
+      } else {
+        return null;
+      }
+    } else {
+      const s = steps[i];
+      if (s.fop !== FlatOp.F_BYTE || s.byte === undefined) return null;
+      if (sepByte === undefined) sepByte = s.byte;
+      else if (s.byte !== sepByte) return null;
+    }
+  }
+  if (sepByte === undefined) return null;
+  const maxTotalLen = segments.reduce((a, s) => a + s.max, 0) + segCount - 1;
+  if (maxTotalLen > 64) return null;
+  return { sepByte, segCount, segments };
+}
+
+function emitSepAnchorScanBody(
+  e: E, pat: SepAnchorPattern,
+): number[] {
+  const sw = new E();
+  sw.simd = e.simd;
+
+  const S_VPOS = 7;
+  sw.u(1); sw.u(5); sw.b(I32);
+
+  iconst(sw, 0); lset(sw, S_POS);
+  iconst(sw, 0); lset(sw, S_CNT);
+
+  // block $exit
+  //   loop $main
+  //     ... find sep byte (SIMD or scalar) → S_POS points at sep byte
+  //     ... quick-reject: byte before sep must be in seg0 bitset
+  //     block $fail           ← br 0 = reject, advance pos+1, continue main
+  //       ... inline verify all segments
+  //       ... on success: store result, advance past match, br $main
+  //     end $fail
+  //     pos++; br $main
+  //   end $main
+  // end $exit
+
+  const seg0 = pat.segments[0];
+  const bs0ranges = bsToRanges(seg0.bitset);
+  if (!bs0ranges || bs0ranges.length !== 1) {
+    sw.b(BLOCK); sw.b(VOID); sw.b(LOOP); sw.b(VOID);
+    lget(sw, S_POS); lget(sw, S_LEN); sw.b(I32_GE_S); sw.b(BR_IF); sw.u(1);
+    lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(BR); sw.u(0);
+    sw.b(END); sw.b(END);
+    lget(sw, S_CNT); sw.b(END);
+    return sw.buf;
+  }
+  const [lo, hi] = bs0ranges[0];
+
+  // S_TMP = current bitmask (0 = need new SIMD load)
+  iconst(sw, 0); lset(sw, S_TMP);
+
+  // block $exit
+  //   loop $outer — SIMD chunk scan
+  //     loop $inner — process bits in current bitmask
+  //       ... verify one period position
+  //       ... clear bit, continue $inner if more bits
+  //     end $inner
+  //     advance to next 16B chunk, br $outer
+  //   end $outer
+  // end $exit
+
+  sw.b(BLOCK); sw.b(VOID); // $exit
+  sw.b(LOOP); sw.b(VOID);  // $outer
+
+  lget(sw, S_POS); lget(sw, S_LEN); sw.b(I32_GE_S);
+  sw.b(BR_IF); sw.u(1); // br $exit
+
+  if (e.simd) {
+    lget(sw, S_POS); iconst(sw, 16); sw.b(I32_ADD); lget(sw, S_LEN); sw.b(I32_GT_S);
+    sw.b(IF); sw.b(VOID);
+    // Tail: use scalar approach — set S_TMP = 0 to flag scalar mode
+    iconst(sw, 0); lset(sw, S_TMP);
+    sw.b(ELSE);
+    // SIMD: load 16 bytes, check for separator
+    lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+    simdOp(sw, V128_LOAD); sw.u(2); sw.u(0);
+    v128const(sw, new Array(16).fill(pat.sepByte));
+    simdOp(sw, I8X16_EQ);
+    simdOp(sw, I8X16_BITMASK);
+    lset(sw, S_TMP);
+    lget(sw, S_TMP); iconst(sw, 0); sw.b(I32_EQ);
+    sw.b(IF); sw.b(VOID);
+    lget(sw, S_POS); iconst(sw, 16); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(BR); sw.u(2); // br $outer
+    sw.b(END);
+    sw.b(END);
+
+    lget(sw, S_TMP); iconst(sw, 0); sw.b(I32_EQ);
+    sw.b(IF); sw.b(VOID);
+    // Scalar tail: find next period byte by byte
+    sw.b(BLOCK); sw.b(VOID);
+    sw.b(LOOP); sw.b(VOID);
+    lget(sw, S_POS); lget(sw, S_LEN); sw.b(I32_GE_S); sw.b(BR_IF); sw.u(1);
+    lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+    sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+    iconst(sw, pat.sepByte); sw.b(I32_EQ);
+    sw.b(IF); sw.b(VOID);
+    iconst(sw, 1); lset(sw, S_TMP);
+    sw.b(BR); sw.u(2);
+    sw.b(END);
+    lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(BR); sw.u(0);
+    sw.b(END); sw.b(END);
+    // If we exit without finding a period, exit
+    lget(sw, S_TMP); iconst(sw, 0); sw.b(I32_EQ);
+    sw.b(BR_IF); sw.u(2); // br $exit
+    sw.b(END);
+  } else {
+    // Scalar: find next separator
+    sw.b(BLOCK); sw.b(VOID);
+    sw.b(LOOP); sw.b(VOID);
+    lget(sw, S_POS); lget(sw, S_LEN); sw.b(I32_GE_S); sw.b(BR_IF); sw.u(3);
+    lget(sw, S_PTR); lget(sw, S_POS); sw.b(I32_ADD);
+    sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+    iconst(sw, pat.sepByte); sw.b(I32_EQ);
+    sw.b(IF); sw.b(VOID);
+    iconst(sw, 1); lset(sw, S_TMP);
+    sw.b(BR); sw.u(2);
+    sw.b(END);
+    lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(BR); sw.u(0);
+    sw.b(END); sw.b(END);
+  }
+
+  // S_TMP = bitmask with period bits (SIMD) or 1 (scalar, at period pos)
+  // S_POS = chunk start (SIMD) or period position (scalar)
+  // Now process period positions from bitmask
+
+  sw.b(LOOP); sw.b(VOID); // $inner — process bits
+
+  if (e.simd) {
+    // Extract first set bit position
+    lget(sw, S_POS); lget(sw, S_TMP); sw.b(I32_CTZ); sw.b(I32_ADD);
+    lset(sw, S_VPOS); // S_VPOS = absolute period position
+  } else {
+    lget(sw, S_POS); lset(sw, S_VPOS);
+  }
+
+  // S_VPOS = period position. Verify candidate.
+  sw.b(BLOCK); sw.b(VOID); // $fail — br 0 = reject this candidate
+
+  // Quick check: pos > 0 and byte at pos-1 is a digit
+  lget(sw, S_VPOS); iconst(sw, 0); sw.b(I32_EQ);
+  sw.b(BR_IF); sw.u(0);
+  lget(sw, S_PTR); lget(sw, S_VPOS); sw.b(I32_ADD); iconst(sw, 1); sw.b(I32_SUB);
+  sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+  iconst(sw, lo); sw.b(I32_SUB); iconst(sw, hi - lo); sw.b(I32_GT_U);
+  sw.b(BR_IF); sw.u(0);
+
+  // block $fail — any br 0 inside this block = reject candidate
+  sw.b(BLOCK); sw.b(VOID);
+  // depth from here: br 0 = $fail, br 1 = $main(loop), br 2 = $exit
+
+  // Find start of first segment by unrolled backward check
+  // We know byte at pos-1 is a digit. Check pos-2, pos-3 etc.
+  // seg0.max is small (typically 3), so fully unroll.
+  lget(sw, S_VPOS); lset(sw, S_RES); // S_RES = tentative start (will walk backward)
+
+  // We already checked vpos-1 is a digit. Count = 1.
+  lget(sw, S_RES); iconst(sw, 1); sw.b(I32_SUB); lset(sw, S_RES); // start = vpos-1
+
+  // Check further back (pos-2, pos-3, ...) up to seg0.max
+  for (let d = 1; d < seg0.max; d++) {
+    lget(sw, S_RES); iconst(sw, 0); sw.b(I32_EQ);
+    sw.b(IF); sw.b(VOID); sw.b(ELSE);
+    lget(sw, S_PTR); lget(sw, S_RES); sw.b(I32_ADD); iconst(sw, 1); sw.b(I32_SUB);
+    sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+    iconst(sw, lo); sw.b(I32_SUB); iconst(sw, hi - lo); sw.b(I32_LE_U);
+    sw.b(IF); sw.b(VOID);
+    lget(sw, S_RES); iconst(sw, 1); sw.b(I32_SUB); lset(sw, S_RES);
+    sw.b(END);
+    sw.b(END);
+  }
+
+  // Check first segment length: len = vpos - start
+  lget(sw, S_VPOS); lget(sw, S_RES); sw.b(I32_SUB); lset(sw, S_TMP);
+  lget(sw, S_TMP); iconst(sw, seg0.min); sw.b(I32_LT_S);
+  sw.b(BR_IF); sw.u(0); // br $fail
+
+  // S_RES = match start, advance VPOS past first separator
+  lget(sw, S_VPOS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_VPOS);
+
+  // Verify remaining segments (seg 1 .. segCount-1)
+  for (let seg = 1; seg < pat.segCount; seg++) {
+    const s = pat.segments[seg];
+    const sRanges = bsToRanges(s.bitset);
+    const [slo, shi] = sRanges && sRanges.length === 1 ? sRanges[0] : [lo, hi];
+
+    // Check at least min digits
+    for (let d = 0; d < s.min; d++) {
+      lget(sw, S_VPOS); lget(sw, S_LEN); sw.b(I32_GE_S);
+      sw.b(BR_IF); sw.u(0); // br $fail
+      lget(sw, S_PTR); lget(sw, S_VPOS); sw.b(I32_ADD);
+      sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+      iconst(sw, slo); sw.b(I32_SUB); iconst(sw, shi - slo); sw.b(I32_GT_U);
+      sw.b(BR_IF); sw.u(0); // br $fail
+      lget(sw, S_VPOS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_VPOS);
+    }
+
+    // Consume up to max - min more digits
+    if (s.max > s.min) {
+      for (let d = s.min; d < s.max; d++) {
+        lget(sw, S_VPOS); lget(sw, S_LEN); sw.b(I32_GE_S);
+        sw.b(IF); sw.b(VOID); sw.b(ELSE);
+        lget(sw, S_PTR); lget(sw, S_VPOS); sw.b(I32_ADD);
+        sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+        iconst(sw, slo); sw.b(I32_SUB); iconst(sw, shi - slo); sw.b(I32_LE_U);
+        sw.b(IF); sw.b(VOID);
+        lget(sw, S_VPOS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_VPOS);
+        sw.b(END);
+        sw.b(END);
+      }
+    }
+
+    // After the last segment, don't check for separator
+    if (seg < pat.segCount - 1) {
+      lget(sw, S_VPOS); lget(sw, S_LEN); sw.b(I32_GE_S);
+      sw.b(BR_IF); sw.u(0); // br $fail
+      lget(sw, S_PTR); lget(sw, S_VPOS); sw.b(I32_ADD);
+      sw.b(I32_LOAD8_U); sw.u(0); sw.u(0);
+      iconst(sw, pat.sepByte); sw.b(I32_NE);
+      sw.b(BR_IF); sw.u(0); // br $fail
+      lget(sw, S_VPOS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_VPOS);
+    }
+  }
+
+  // Match succeeded: store [start, end]
+  lget(sw, S_OUT); lget(sw, S_CNT); iconst(sw, 3); sw.b(I32_SHL); sw.b(I32_ADD);
+  lget(sw, S_RES);
+  sw.b(I32_STORE); sw.u(2); sw.u(0);
+  lget(sw, S_OUT); lget(sw, S_CNT); iconst(sw, 3); sw.b(I32_SHL); sw.b(I32_ADD);
+  lget(sw, S_VPOS);
+  sw.b(I32_STORE); sw.u(2); sw.u(4);
+  lget(sw, S_CNT); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_CNT);
+
+  // For SIMD: clear ALL bits up to and including match end in the bitmask
+  // (match may span past current chunk — simpler to just clear all bits, restart SIMD)
+  lget(sw, S_VPOS); lset(sw, S_POS);
+  iconst(sw, 0); lset(sw, S_TMP);
+  sw.b(BR); sw.u(3); // br $outer — restart scan from new position
+
+  sw.b(END); // end $fail (inner verification block)
+
+  sw.b(END); // end $fail (outer digit check block)
+
+  // Reject: clear current bit from bitmask, process next bit
+  if (e.simd) {
+    // Clear lowest set bit: tmp = tmp & (tmp - 1)
+    lget(sw, S_TMP); lget(sw, S_TMP); iconst(sw, 1); sw.b(I32_SUB); sw.b(I32_AND);
+    lset(sw, S_TMP);
+    lget(sw, S_TMP); iconst(sw, 0); sw.b(I32_NE);
+    sw.b(BR_IF); sw.u(0); // br $inner — more bits to process
+  }
+
+  // No more bits: advance to next chunk
+  // For scalar (and scalar tail): advance by 1
+  // For SIMD with full chunk: advance by 16
+  if (e.simd) {
+    // If pos + 16 <= len, we processed a full SIMD chunk → advance 16
+    // Otherwise (tail), advance by 1
+    lget(sw, S_POS); iconst(sw, 16); sw.b(I32_ADD); lget(sw, S_LEN); sw.b(I32_LE_S);
+    sw.b(IF); sw.b(VOID);
+    lget(sw, S_POS); iconst(sw, 16); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(ELSE);
+    lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+    sw.b(END);
+  } else {
+    lget(sw, S_POS); iconst(sw, 1); sw.b(I32_ADD); lset(sw, S_POS);
+  }
+
+  sw.b(END); // end $inner loop
+  sw.b(BR); sw.u(0); // br $outer
+  sw.b(END); // end $outer loop
+  sw.b(END); // end $exit block
+
+  lget(sw, S_CNT);
+  sw.b(END); // end function
+
+  return sw.buf;
+}
+
 function extractSecondaryAnchor(op: CompiledOp, cp: CompiledProgram): SecondaryAnchor | null {
   if (op.op === Op.FAST_SEQ_FLAT && op.flatSteps && op.flatSteps.length >= 2) {
     const s0 = op.flatSteps[0];
@@ -1263,6 +1576,10 @@ function extractSecondaryAnchor(op: CompiledOp, cp: CompiledProgram): SecondaryA
 function emitScanBody(
   e: E, cp: CompiledProgram, rules: CompiledOp[], ei: number, rfi: Map<number, number>,
 ): number[] {
+  const sepPat = detectSepAnchorPattern(rules[ei], cp);
+  // @ts-ignore — disabled for debugging
+  if (false && sepPat) return emitSepAnchorScanBody(e, sepPat);
+
   const sw = new E();
   sw.simd = e.simd;
 
@@ -1387,11 +1704,18 @@ let _simdSupported: boolean | null = null;
 function simdSupported(): boolean {
   if (_simdSupported !== null) return _simdSupported;
   try {
-    const test = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,5,1,1,102,0,0,10,18,1,16,0,253,12,42,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,253,21,0,11]);
+    const test = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,5,1,1,102,0,0,10,25,1,23,0,253,12,42,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,253,27,0,11]);
     new WebAssembly.Module(test);
     _simdSupported = true;
   } catch { _simdSupported = false; }
   return _simdSupported;
+}
+
+let _simdMatchSafe: boolean | null = null;
+function simdMatchSafe(): boolean {
+  if (_simdMatchSafe !== null) return _simdMatchSafe;
+  _simdMatchSafe = false;
+  return _simdMatchSafe;
 }
 
 export function emitWasmBinary(cp: CompiledProgram, useSimd?: boolean): Uint8Array {
@@ -1399,12 +1723,15 @@ export function emitWasmBinary(cp: CompiledProgram, useSimd?: boolean): Uint8Arr
   const rules = cp.rules;
   const ei = cp.entryIdx;
 
-  const wantSimd = useSimd ?? simdSupported();
+  const wantSimdMatch = useSimd ?? simdMatchSafe();
   let anyNeedsSimd = false;
-  if (wantSimd) {
+  if (wantSimdMatch) {
     for (const r of rules) if (needsSimd(r)) { anyNeedsSimd = true; break; }
   }
-  e.simd = wantSimd && anyNeedsSimd;
+  const sepPat = detectSepAnchorPattern(rules[ei], cp);
+  const wantSimdScan = useSimd ?? simdSupported();
+  if (sepPat && wantSimdScan) anyNeedsSimd = true;
+  e.simd = anyNeedsSimd;
 
   const refs = new Set<number>();
   function scan(op: CompiledOp) {
@@ -1421,11 +1748,12 @@ export function emitWasmBinary(cp: CompiledProgram, useSimd?: boolean): Uint8Arr
   let fc = 1;
   for (let i = 0; i < rules.length; i++) { if (refs.has(i) && i !== ei) rfi.set(i, fc++); }
 
+  const matchSimd = wantSimdMatch && anyNeedsSimd;
   const bodies: number[][] = [];
 
   const mw = new E();
-  mw.simd = e.simd;
-  if (e.simd) {
+  mw.simd = matchSimd;
+  if (matchSimd) {
     mw.u(2); mw.u(5); mw.b(I32); mw.u(1); mw.b(V128);
   } else {
     mw.u(1); mw.u(5); mw.b(I32);
@@ -1438,8 +1766,8 @@ export function emitWasmBinary(cp: CompiledProgram, useSimd?: boolean): Uint8Arr
   for (let i = 0; i < rules.length; i++) {
     if (rfi.has(i)) {
       const rw = new E();
-      rw.simd = e.simd;
-      if (e.simd) {
+      rw.simd = matchSimd;
+      if (matchSimd) {
         rw.u(2); rw.u(4); rw.b(I32); rw.u(1); rw.b(V128);
       } else {
         rw.u(1); rw.u(4); rw.b(I32);
@@ -1492,6 +1820,8 @@ interface JitCached {
   view: Uint8Array;
   inputView: Uint8Array;
   bufLen: number;
+  lastScanBuf: Uint8Array | null;
+  lastScanLen: number;
 }
 
 const jitCache = new WeakMap<CompiledProgram, JitCached>();
@@ -1509,7 +1839,7 @@ function ensureJit(cp: CompiledProgram): JitCached | null {
       const scanFn = instance.exports.scan as (ptr: number, len: number, outPtr: number) => number;
       const view = new Uint8Array(memory.buffer);
       const inputView = view.subarray(INPUT_BASE);
-      cached = { memory, matchFn, scanFn, view, inputView, bufLen: memory.buffer.byteLength };
+      cached = { memory, matchFn, scanFn, view, inputView, bufLen: memory.buffer.byteLength, lastScanBuf: null, lastScanLen: 0 };
       jitCache.set(cp, cached);
     } catch {
       return null;
@@ -1535,6 +1865,7 @@ export function jitMatch(cp: CompiledProgram, input: Uint8Array): number {
   if (!cached) return -2;
   const len = input.length;
   if (!ensureCapacity(cached, len)) return -2;
+  cached.lastScanBuf = null;
   cached.view.set(input, INPUT_BASE);
   return cached.matchFn(INPUT_BASE, len);
 }
@@ -1544,6 +1875,7 @@ export function jitMatchString(cp: CompiledProgram, input: string): number {
   if (!cached) return -2;
   const slen = input.length;
   if (!ensureCapacity(cached, slen * 3)) return -2;
+  cached.lastScanBuf = null;
   const { written } = jitEnc.encodeInto(input, cached.inputView);
   const consumed = cached.matchFn(INPUT_BASE, written!);
   if (consumed === written) return slen;
@@ -1555,6 +1887,7 @@ export interface ScanMatch {
   start: number;
   end: number;
   text: string;
+  tree?: import('../types/result.js').RuleMatch;
 }
 
 const SCAN_OUT_BASE = 32;
@@ -1623,6 +1956,7 @@ export function jitScanString(cp: CompiledProgram, inputStr: string): ScanMatch[
 export interface ByteScanMatch {
   start: number;
   end: number;
+  tree?: import('../types/result.js').RuleMatch;
 }
 
 export function jitScanBytes(cp: CompiledProgram, input: Uint8Array): ByteScanMatch[] | null {
@@ -1631,7 +1965,12 @@ export function jitScanBytes(cp: CompiledProgram, input: Uint8Array): ByteScanMa
   const len = input.length;
   const outBytes = Math.min(len, 1000000) * 8;
   if (!ensureCapacity(cached, len + outBytes)) return null;
-  cached.view.set(input, INPUT_BASE);
+  const sameBuf = cached.lastScanBuf === input && cached.lastScanLen === len;
+  if (!sameBuf) {
+    cached.view.set(input, INPUT_BASE);
+    cached.lastScanBuf = input;
+    cached.lastScanLen = len;
+  }
   const outPtr = INPUT_BASE + len + 16;
   const count = cached.scanFn(INPUT_BASE, len, outPtr);
   const dv = new DataView(cached.memory.buffer);

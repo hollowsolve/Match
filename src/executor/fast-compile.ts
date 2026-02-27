@@ -359,6 +359,29 @@ export function compile(program: MatchProgram): CompiledProgram {
     return result;
   }
 
+  function canMatchEmpty(op: CompiledOp): boolean {
+    switch (op.op) {
+      case Op.REP_ZERO_OR_MORE:
+      case Op.REP_OPTIONAL:
+        return true;
+      case Op.FAST_REPEAT_BITSET:
+      case Op.FAST_BETWEEN_BITSET:
+        return op.min === 0;
+      case Op.SEQ:
+        return !!op.children && op.children.every(canMatchEmpty);
+      case Op.ALT:
+        return !!op.children && op.children.some(canMatchEmpty);
+      case Op.FAST_SEQ2:
+        return canMatchEmpty(op.child!) && canMatchEmpty(op.child2!);
+      case Op.FAST_SEQ3:
+        return canMatchEmpty(op.child!) && canMatchEmpty(op.child2!) && canMatchEmpty(op.child3!);
+      default:
+        return false;
+    }
+  }
+
+  let preserveRuleRefs = false;
+
   function compileNode(node: ASTNode): CompiledOp {
     switch (node.type) {
       case 'named_char': return { op: Op.BYTE, byte: node.byte };
@@ -460,6 +483,9 @@ export function compile(program: MatchProgram): CompiledProgram {
 
       case 'repeat': {
         const child = compileNode(node.child);
+        if ((node.mode === 'zero_or_more' || node.mode === 'one_or_more') && canMatchEmpty(child)) {
+          return child.op === Op.REP_OPTIONAL ? { op: Op.REP_ZERO_OR_MORE, child: child.child! } : child;
+        }
         if ((node.mode === 'one_or_more' || node.mode === 'zero_or_more') && child.op !== Op.CHAR_CLASS_ANY) {
           const bs = opToBitset(child);
           if (bs) {
@@ -539,8 +565,10 @@ export function compile(program: MatchProgram): CompiledProgram {
       case 'rule_ref': {
         const idx = ruleMap.get(node.name);
         if (idx !== undefined) {
-          if (isInlinable(program.rules[idx].body)) return compileNode(program.rules[idx].body);
-          if (canDeepInline(idx)) return compileNode(program.rules[idx].body);
+          if (!preserveRuleRefs) {
+            if (isInlinable(program.rules[idx].body)) return compileNode(program.rules[idx].body);
+            if (canDeepInline(idx)) return compileNode(program.rules[idx].body);
+          }
           return { op: Op.RULE_REF, ruleIdx: idx };
         }
         return { op: Op.RULE_REF, ruleIdx: -1 };
@@ -563,12 +591,18 @@ export function compile(program: MatchProgram): CompiledProgram {
   const rules = program.rules.map(r => compileNode(r.body));
   const entryIdx = ruleMap.get(program.entryPoint) ?? 0;
 
+  preserveRuleRefs = true;
+  const treeRules = program.rules.map(r => compileNode(r.body));
+  preserveRuleRefs = false;
+
   const MAX_INLINE_SIZE = 16;
   const ruleSizes = rules.map(r => opSize(r));
 
   function inlineSmallRules(op: CompiledOp): CompiledOp {
     if (op.op === Op.RULE_REF && op.ruleIdx! >= 0 && ruleSizes[op.ruleIdx!] <= MAX_INLINE_SIZE) {
-      return cloneOp(rules[op.ruleIdx!]);
+      const c = cloneOp(rules[op.ruleIdx!]);
+      c.inlinedRuleIdx = op.ruleIdx!;
+      return c;
     }
     if (op.child) op.child = inlineSmallRules(op.child);
     if (op.child2) op.child2 = inlineSmallRules(op.child2);
@@ -601,6 +635,7 @@ export function compile(program: MatchProgram): CompiledProgram {
     if (op.flatSteps) c.flatSteps = op.flatSteps;
     if (op.flatTail) c.flatTail = op.flatTail.map(cloneOp);
     if (op.leadByte !== undefined) c.leadByte = op.leadByte;
+    if (op.inlinedRuleIdx !== undefined) c.inlinedRuleIdx = op.inlinedRuleIdx;
     return c;
   }
 
@@ -856,5 +891,5 @@ export function compile(program: MatchProgram): CompiledProgram {
       fullyFlat = eop.flatSteps.every(isInlinableStep);
     }
   }
-  return { rules, ruleNames, entryIdx, entryPoint: program.entryPoint, source: program, needsMemo, hasExtract, fullyFlat };
+  return { rules, ruleNames, entryIdx, entryPoint: program.entryPoint, source: program, needsMemo, hasExtract, fullyFlat, treeRules };
 }

@@ -106,6 +106,7 @@ export interface CompiledOp {
   fixedPrefix?: Uint32Array;
   fixedPrefixLen?: number;
   fixedPrefixSteps?: number;
+  inlinedRuleIdx?: number;
 }
 
 export interface CompiledProgram {
@@ -117,6 +118,7 @@ export interface CompiledProgram {
   needsMemo: boolean;
   hasExtract: boolean;
   fullyFlat?: boolean;
+  treeRules?: CompiledOp[];
 }
 
 export function makeBitset(bytes: number[]): Uint32Array {
