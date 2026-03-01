@@ -44,6 +44,7 @@ const SECTIONS: DocSection[] = [
       { title: 'run', slug: 'run' },
       { title: 'parse & match', slug: 'parse-match' },
       { title: 'find', slug: 'find' },
+      { title: 'scan', slug: 'scan' },
       { title: 'tryParse', slug: 'try-parse' },
       { title: 'Search', slug: 'search' },
       { title: 'Diagnostics', slug: 'diagnostics' },
@@ -953,6 +954,73 @@ const matches = find(program, 'port 8080 and port 443')
   )
 }
 
+function ScanDoc() {
+  return (
+    <DocPage>
+      <H1>scan</H1>
+      <Pre label="typescript">{`scan(program: MatchProgram, input: string, options?: ScanOptions): ScanMatch[]
+scanBytes(program: MatchProgram, input: Uint8Array, options?: ScanOptions): ByteScanMatch[]`}</Pre>
+      <P>WASM JIT + SIMD accelerated scanning. Finds all non-overlapping matches of a pattern in a string or byte buffer. Designed for high-throughput scanning over large inputs (files, logs, network data).</P>
+      <Pre label="app.ts">{`import { parse, scan, scanBytes } from '@hollowsolve/match'
+import fs from 'fs'
+
+const program = parse('main: one or more digits')
+
+// String scanning
+const matches = scan(program, 'port 8080 and port 443')
+// [{ start: 5, end: 9, text: "8080" }, { start: 20, end: 23, text: "443" }]
+
+// Byte scanning — no string conversion overhead
+const buf = fs.readFileSync('access.log')
+const hits = scanBytes(program, buf)
+// [{ start: 42, end: 46 }, { start: 103, end: 106 }, ...]`}</Pre>
+      <P><Code>scanBytes</Code> operates on raw bytes with no string conversion, returning byte-level offsets. Use it when you need maximum throughput and don't need the matched text.</P>
+
+      <H2>Parse trees</H2>
+      <P>Pass <Code>{'{'}tree: true{'}'}</Code> to enrich each match with a full parse tree:</P>
+      <Pre label="app.ts">{`const results = scan(program, 'port 8080 and port 443', { tree: true })
+results[0].tree
+// { rule: "main", start: 5, end: 9, text: "8080", children: [] }`}</Pre>
+      <P>Without the <Code>tree</Code> option, the <Code>tree</Code> field is <Code>undefined</Code> — the scanner skips tree construction for speed.</P>
+
+      <H2>ScanMatch</H2>
+      <Pre label="typescript">{`interface ScanMatch {
+  start: number       // character offset (inclusive)
+  end: number         // character offset (exclusive)
+  text: string        // matched text
+  tree?: RuleMatch    // parse tree (when tree: true)
+}
+
+interface ByteScanMatch {
+  start: number       // byte offset (inclusive)
+  end: number         // byte offset (exclusive)
+  tree?: RuleMatch    // parse tree (when tree: true)
+}
+
+interface ScanOptions {
+  tree?: boolean      // enrich results with parse trees
+}`}</Pre>
+
+      <H2>scan vs find</H2>
+      <P><Code>find</Code> uses the JS interpreter and always builds full parse trees. <Code>scan</Code> uses the WASM JIT with SIMD acceleration and skips tree construction by default. Use <Code>scan</Code>/<Code>scanBytes</Code> when performance matters and you're scanning large inputs.</P>
+
+      <H2>Performance</H2>
+      <P>The WASM scanner uses SIMD lead-byte acceleration to skip non-matching bytes in 16-byte chunks. Benchmarked against V8's <Code>RegExp</Code> with <Code>String.match()</Code>:</P>
+      <Pre label="bench-inputs.mjs">{`Pattern       Size       Regex ms   Match ms   Ratio
+─────────────────────────────────────────────────────────
+Email         1 MB       7.9        4.0        0.51x
+Email         10 MB      77.4       41.5       0.54x
+URI           1 MB       7.4        3.8        0.51x
+URI           10 MB      74.6       37.8       0.51x
+Date          1 MB       0.5        0.1        0.22x
+Date          10 MB      4.7        1.4        0.30x
+IP            1 MB       0.2        0.1        0.55x
+IP            10 MB      2.8        1.9        0.69x`}</Pre>
+      <P>1.5–5x faster than regex for structured patterns at scale. Patterns with distinctive lead bytes (dates with digits, emails with <Code>@</Code>) benefit most from SIMD skip-ahead.</P>
+    </DocPage>
+  )
+}
+
 function TryParseDoc() {
   return (
     <DocPage>
@@ -1127,6 +1195,26 @@ function TypesDoc() {
   tree: RuleMatch
 }`}</Pre>
 
+      <H2>ScanMatch</H2>
+      <Pre label="typescript">{`interface ScanMatch {
+  start: number
+  end: number
+  text: string
+  tree?: RuleMatch
+}`}</Pre>
+
+      <H2>ByteScanMatch</H2>
+      <Pre label="typescript">{`interface ByteScanMatch {
+  start: number
+  end: number
+  tree?: RuleMatch
+}`}</Pre>
+
+      <H2>ScanOptions</H2>
+      <Pre label="typescript">{`interface ScanOptions {
+  tree?: boolean
+}`}</Pre>
+
       <H2>Stability</H2>
       <P>All exported types, function signatures, and the <Code>formatFailure</Code> output format are stable public API. Tooling may depend on these interfaces.</P>
     </DocPage>
@@ -1253,13 +1341,30 @@ STRESS FAIL early (50k)      39x`}</Pre>
       <P>The benchmark uses <Code>fastMatch</Code> for Match (boolean-only, no tree building) and <Code>RegExp.test()</Code> for regex. Both are anchored full-match checks. Regex patterns use <Code>^...$</Code> anchors to match the full input.</P>
       <P>Ties are defined as M/R between 0.95 and 1.05.</P>
 
+      <H2 id="scanning">Scanning benchmarks</H2>
+      <P><Code>scanBytes</Code> uses the WASM JIT with SIMD lead-byte acceleration to find all matches of a pattern in a large buffer. Benchmarked against V8's <Code>RegExp</Code> with <Code>String.match()</Code> across varying input sizes and match densities:</P>
+      <Pre label="bench-inputs.mjs">{`Pattern       Size       Density    Regex ms   Match ms   Ratio
+──────────────────────────────────────────────────────────────────
+Email         1 MB       moderate   7.9        4.0        0.51x
+Email         10 MB      moderate   75.6       40.6       0.54x
+IP            1 MB       moderate   0.2        0.1        0.55x
+IP            10 MB      moderate   2.8        1.9        0.69x
+URI           1 MB       moderate   6.9        3.8        0.55x
+URI           10 MB      moderate   68.7       37.8       0.55x
+Date          1 MB       moderate   0.5        0.1        0.22x
+Date          10 MB      moderate   4.7        1.4        0.30x
+HexColor      1 MB       dense      1.8        0.9        0.52x
+HexColor      10 MB      dense      21.6       9.5        0.44x`}</Pre>
+      <P>1.5–5x faster than regex for structured patterns at scale. The SIMD scanner processes 16 bytes per iteration, skipping non-matching bytes by checking lead bytes in bulk. Patterns with distinctive lead bytes (dates with digits, emails with <Code>@</Code>) benefit most.</P>
+
       <H2 id="reproduce">Reproduce</H2>
       <Pre label="terminal">{`git clone https://github.com/user/match
 cd match
 npm install
 npm run build
-node bench-wasm-jit.mjs`}</Pre>
-      <P>The benchmark script is <Code>bench-wasm-jit.mjs</Code> in the repository root. It prints a table with all 182 tests, timings, ratios, engine selection, and winners.</P>
+node bench-wasm-jit.mjs    # full-input matching benchmarks
+node bench-inputs.mjs      # scanning benchmarks`}</Pre>
+      <P>The benchmark scripts are in the repository root. <Code>bench-wasm-jit.mjs</Code> prints full-input matching results (182 tests). <Code>bench-inputs.mjs</Code> tests scanning across 6 patterns, 4 input sizes, and 3 match densities.</P>
 
       <H2 id="full-results">Full results (182 tests)</H2>
       <Pre label="bench-wasm-jit.mjs">{`Test                                       Input    M/R      Engine   Winner
@@ -1780,6 +1885,7 @@ export function DocsLayout() {
         <Route path="api/run" element={<RunDoc />} />
         <Route path="api/parse-match" element={<ParseMatchDoc />} />
         <Route path="api/find" element={<FindDoc />} />
+        <Route path="api/scan" element={<ScanDoc />} />
         <Route path="api/try-parse" element={<TryParseDoc />} />
         <Route path="api/search" element={<SearchDoc />} />
         <Route path="api/diagnostics" element={<DiagnosticsDoc />} />

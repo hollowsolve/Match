@@ -1870,6 +1870,55 @@ export function jitMatch(cp: CompiledProgram, input: Uint8Array): number {
   return cached.matchFn(INPUT_BASE, len);
 }
 
+export function jitMatchMany(cp: CompiledProgram, inputs: string[], results: boolean[]): boolean {
+  const cached = ensureJit(cp);
+  if (!cached) return false;
+  const n = inputs.length;
+  let totalChars = 0;
+  let allAscii = true;
+  for (let i = 0; i < n; i++) {
+    const s = inputs[i];
+    totalChars += s.length;
+    if (allAscii) {
+      for (let j = 0; j < s.length; j++) {
+        if (s.charCodeAt(j) > 0x7F) { allAscii = false; break; }
+      }
+    }
+  }
+  const needed = allAscii ? totalChars : totalChars * 3;
+  if (!ensureCapacity(cached, needed)) return false;
+  cached.lastScanBuf = null;
+  const view = cached.view;
+  const offsets = new Uint32Array(n);
+  const lengths = new Uint32Array(n);
+  let off = 0;
+  if (allAscii) {
+    for (let i = 0; i < n; i++) {
+      offsets[i] = off;
+      const s = inputs[i];
+      const slen = s.length;
+      lengths[i] = slen;
+      const base = INPUT_BASE + off;
+      for (let j = 0; j < slen; j++) view[base + j] = s.charCodeAt(j);
+      off += slen;
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      offsets[i] = off;
+      const target = new Uint8Array(view.buffer, INPUT_BASE + off, inputs[i].length * 3);
+      const { written } = jitEnc.encodeInto(inputs[i], target);
+      lengths[i] = written!;
+      off += written!;
+    }
+  }
+  const matchFn = cached.matchFn;
+  for (let i = 0; i < n; i++) {
+    const consumed = matchFn(INPUT_BASE + offsets[i], lengths[i]);
+    results[i] = consumed === lengths[i];
+  }
+  return true;
+}
+
 export function jitMatchString(cp: CompiledProgram, input: string): number {
   const cached = ensureJit(cp);
   if (!cached) return -2;

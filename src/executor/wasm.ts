@@ -1,7 +1,7 @@
 import { CompiledProgram, fastMatch as jsFastMatch } from './fast.js';
-import { jitMatch, jitMatchString, jitScanString, jitScanBytes } from './wasm-jit.js';
+import { jitMatch, jitMatchString, jitMatchMany, jitScanString, jitScanBytes } from './wasm-jit.js';
 import type { ByteScanMatch } from './wasm-jit.js';
-import { jsJitMatch } from './js-jit.js';
+import { jsJitMatch, jsJitMatchStr } from './js-jit.js';
 import { vmMatch, vmMatchString, vmMatchTree } from './vm-exec.js';
 import type { VmTreeResult } from './vm-exec.js';
 import type { ScanMatch } from './wasm-jit.js';
@@ -156,6 +156,24 @@ function advanceChars(str: string, charPos: number, bytes: Uint8Array, byteStart
     ci++;
   }
   return ci;
+}
+
+export function fastMatchMany(cp: CompiledProgram, inputs: string[]): boolean[] {
+  const n = inputs.length;
+  const results = new Array<boolean>(n);
+  const probe = jsJitMatchStr(cp, '');
+  if (probe !== -2) {
+    const fn = (cp as any)._jsJitStr as (d: string, l: number) => number;
+    for (let i = 0; i < n; i++) {
+      const s = inputs[i];
+      results[i] = fn(s, s.length) === s.length;
+    }
+    return results;
+  }
+  for (let i = 0; i < n; i++) {
+    results[i] = wasmFastMatchString(cp, inputs[i]) === inputs[i].length;
+  }
+  return results;
 }
 
 export { vmMatch, vmMatchString, vmMatchTree };

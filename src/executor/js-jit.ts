@@ -1,8 +1,10 @@
 import { Op, FlatOp, CompiledOp, CompiledProgram, opToBitset } from './fast-types.js';
 
 type MatchFn = (input: Uint8Array, len: number) => number;
+type StrMatchFn = (input: string, len: number) => number;
 
 const jitJsCache = new WeakMap<CompiledProgram, MatchFn | null>();
+const jitJsStrCache = new WeakMap<CompiledProgram, StrMatchFn | null>();
 
 export function jsJitMatch(cp: CompiledProgram, input: Uint8Array): number {
   let fn = (cp as any)._jsJit as MatchFn | null | undefined;
@@ -18,41 +20,99 @@ export function jsJitMatch(cp: CompiledProgram, input: Uint8Array): number {
   return fn(input, input.length);
 }
 
-function compileJs(cp: CompiledProgram): MatchFn | null {
+export function jsJitMatchStr(cp: CompiledProgram, input: string): number {
+  let fn = (cp as any)._jsJitStr as StrMatchFn | null | undefined;
+  if (fn === undefined) {
+    fn = jitJsStrCache.get(cp) ?? undefined;
+    if (fn === undefined) {
+      fn = compileJsStr(cp);
+      jitJsStrCache.set(cp, fn);
+    }
+    try { (cp as any)._jsJitStr = fn; } catch {}
+  }
+  if (!fn) return -2;
+  return fn(input, input.length);
+}
+
+function buildJsSrc(cp: CompiledProgram): { src: string; args: CapturedArg[] } | null {
   const entry = cp.rules[cp.entryIdx];
   const ctx = new Ctx();
-  try {
-    const refs = new Set<number>();
-    scanRefs(entry, refs);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const ri of refs) {
-        const before = refs.size;
-        scanRefs(cp.rules[ri], refs);
-        if (refs.size > before) changed = true;
-      }
-    }
-    if (cp.needsMemo) return null;
-    const ruleFns = new Map<number, string>();
+  const refs = new Set<number>();
+  scanRefs(entry, refs);
+  let changed = true;
+  while (changed) {
+    changed = false;
     for (const ri of refs) {
-      if (ri < 0 || ri >= cp.rules.length) continue;
-      const fnName = `_r${ri}`;
-      ruleFns.set(ri, fnName);
+      const before = refs.size;
+      scanRefs(cp.rules[ri], refs);
+      if (refs.size > before) changed = true;
     }
-    ctx.ruleFns = ruleFns;
-    let ruleSrc = '';
-    for (const [ri, fnName] of ruleFns) {
-      const ruleBody = emitPosOp(ctx, cp.rules[ri], cp);
-      if (ruleBody === null) return null;
-      ruleSrc += `function ${fnName}(d,l,p){${ruleBody}return p;}\n`;
-    }
-    const body = emitEntry(ctx, entry, cp);
-    if (body === null) return null;
-    const args = ctx.args;
+  }
+  if (cp.needsMemo) return null;
+  const ruleFns = new Map<number, string>();
+  for (const ri of refs) {
+    if (ri < 0 || ri >= cp.rules.length) continue;
+    const fnName = `_r${ri}`;
+    ruleFns.set(ri, fnName);
+  }
+  ctx.ruleFns = ruleFns;
+  let ruleSrc = '';
+  for (const [ri, fnName] of ruleFns) {
+    const ruleBody = emitPosOp(ctx, cp.rules[ri], cp);
+    if (ruleBody === null) return null;
+    ruleSrc += `function ${fnName}(d,l,p){${ruleBody}return p;}\n`;
+  }
+  const body = emitEntry(ctx, entry, cp);
+  if (body === null) return null;
+  const src = `return function(d,l){${ruleSrc}${ctx.altFns}${body}}`;
+  return { src, args: ctx.args };
+}
+
+function compileJs(cp: CompiledProgram): MatchFn | null {
+  try {
+    const result = buildJsSrc(cp);
+    if (!result) return null;
+    const { src, args } = result;
     const argNames = args.map((_, i) => `_${i}`);
-    const src = `return function(d,l){${ruleSrc}${ctx.altFns}${body}}`;
     const factory = new Function(...argNames, src);
+    return factory(...args.map(a => a.value));
+  } catch {
+    return null;
+  }
+}
+
+function byteSrcToStrSrc(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    if (src[i] === 'd' && i + 1 < src.length && src[i + 1] === '[' && (i === 0 || !isIdChar(src[i - 1]))) {
+      out += 'd.charCodeAt(';
+      i += 2;
+      let depth = 1;
+      while (i < src.length && depth > 0) {
+        if (src[i] === '[') depth++;
+        else if (src[i] === ']') { depth--; if (depth === 0) { out += ')'; i++; break; } }
+        out += src[i++];
+      }
+    } else {
+      out += src[i++];
+    }
+  }
+  return out;
+}
+
+function isIdChar(c: string): boolean {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_' || (c >= '0' && c <= '9');
+}
+
+function compileJsStr(cp: CompiledProgram): StrMatchFn | null {
+  try {
+    const result = buildJsSrc(cp);
+    if (!result) return null;
+    const { src, args } = result;
+    const strSrc = byteSrcToStrSrc(src);
+    const argNames = args.map((_, i) => `_${i}`);
+    const factory = new Function(...argNames, strSrc);
     return factory(...args.map(a => a.value));
   } catch {
     return null;

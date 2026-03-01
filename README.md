@@ -47,6 +47,20 @@ find(program, 'port 8080 and port 443')
 // [{ start: 5, end: 9, text: "8080" }, { start: 20, end: 23, text: "443" }]
 ```
 
+High-performance scanning over large buffers:
+
+```js
+import { parse, scan, scanBytes } from '@hollowsolve/match'
+
+const program = parse('main: one or more digits')
+
+scan(program, 'port 8080 and port 443')
+// [{ start: 5, end: 9, text: "8080" }, { start: 20, end: 23, text: "443" }]
+
+const buf = fs.readFileSync('access.log')
+scanBytes(program, buf)  // byte-level offsets, no string conversion
+```
+
 Compile once, match many:
 
 ```js
@@ -274,6 +288,26 @@ find(program: MatchProgram, input: string): FindMatch[]
 
 Find all non-overlapping matches of a pattern within a string. Returns an array of `{ start, end, text, tree }`.
 
+### Scan
+
+```ts
+scan(program: MatchProgram, input: string, options?: ScanOptions): ScanMatch[]
+scanBytes(program: MatchProgram, input: Uint8Array, options?: ScanOptions): ByteScanMatch[]
+```
+
+WASM JIT + SIMD accelerated scanning. Finds all non-overlapping matches in a string or byte buffer. `scanBytes` operates on raw bytes with no string conversion — designed for large-input scanning (files, logs, network data).
+
+`ScanMatch` returns `{ start, end, text }`. `ByteScanMatch` returns `{ start, end }` (byte offsets only).
+
+Pass `{ tree: true }` to enrich each match with a full parse tree:
+
+```js
+const results = scan(program, input, { tree: true })
+results[0].tree  // RuleMatch with children, offsets, etc.
+```
+
+### File search
+
 ```ts
 searchFile(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
 searchFolder(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
@@ -408,13 +442,13 @@ Match uses a three-tier execution engine:
 
 The engine tier is chosen automatically. The fast paths handle boolean matching; the tree executor reconstructs full `RuleMatch` trees from WASM memory events.
 
-Across a 182-test benchmark suite against V8's `RegExp` engine: **Match wins 123, regex wins 41, 18 ties.** Highlights:
+**Where Match is faster:** exact-count patterns (`4 digits`, `32 hex digits`), bounded ranges (`between 1 and 255 digits`), structured formats (UUID, credit card, date YYYY-MM-DD), large inputs (WASM SIMD processes 16 bytes/iteration), failure rejection (fast path returns immediately), and joined-by patterns (fused element+separator loops).
 
-**Where Match wins:** exact-count patterns (e.g. `4 digits`: 0.57x), bounded ranges (`between 1 and 255 digits`: 0.34x), structured formats (UUID: 0.37x, credit card: 0.46x, date YYYY-MM-DD: 0.62x), large-input scanning (1M digits: 0.72x, joined lists: 0.65x), and failure rejection (late mismatch: 0.21x, too short: 0.33x).
+**Where regex is faster:** `\w` word characters (V8 has a native intrinsic), multi-step sequences with many small literals on short inputs, recursive/nested grammars, and first-byte failure on large WASM inputs (module instantiation overhead).
 
-**Where regex wins:** `\w` word characters (V8 has a native intrinsic: 1.3-1.6x), multi-step sequences with many small literals on short inputs (1.2-1.4x), recursive/nested grammars (10x+), and first-byte failure on large WASM inputs (WASM setup overhead).
+**Scanning** (`scan` / `scanBytes`): WASM JIT with SIMD lead-byte acceleration. Skips non-matching bytes in 16-byte chunks. Faster than regex for structured patterns at scale, especially patterns with distinctive lead bytes (dates with digits, emails with `@`).
 
-Run it yourself: `node bench-wasm-jit.mjs`
+Run it yourself: `node bench-wasm-jit.mjs` (matching) · `node bench-inputs.mjs` (scanning)
 
 Full methodology and results: [matchlang.com/docs/api/benchmarks](https://matchlang.com/docs/api/benchmarks)
 

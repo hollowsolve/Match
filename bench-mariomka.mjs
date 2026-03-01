@@ -5,23 +5,36 @@ const file = process.argv[2] || '/tmp/regex-benchmark/input-text.txt';
 const data = fs.readFileSync(file, 'utf8');
 const dataBytes = fs.readFileSync(file);
 
+const RUNS = 10;
+
 function measureRegex(label, pattern) {
-  const start = process.hrtime.bigint();
-  const regex = new RegExp(pattern, 'g');
-  const matches = data.match(regex);
-  const count = matches ? matches.length : 0;
-  const ms = Number(process.hrtime.bigint() - start) / 1e6;
-  return { label, ms, count, engine: 'Regex' };
+  const re0 = new RegExp(pattern, 'g');
+  data.match(re0);
+  let best = Infinity, count = 0;
+  for (let i = 0; i < RUNS; i++) {
+    const regex = new RegExp(pattern, 'g');
+    const start = process.hrtime.bigint();
+    const matches = data.match(regex);
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    count = matches ? matches.length : 0;
+    if (ms < best) best = ms;
+  }
+  return { label, ms: best, count, engine: 'Regex' };
 }
 
 function measureMatch(label, grammar) {
   const program = parse(grammar);
   scanBytes(program, new Uint8Array([119, 97, 114, 109]));
-  const start = process.hrtime.bigint();
-  const matches = scanBytes(program, dataBytes);
-  const count = matches.length;
-  const ms = Number(process.hrtime.bigint() - start) / 1e6;
-  return { label, ms, count, engine: 'Match' };
+  scanBytes(program, dataBytes);
+  let best = Infinity, count = 0;
+  for (let i = 0; i < RUNS; i++) {
+    const start = process.hrtime.bigint();
+    const matches = scanBytes(program, dataBytes);
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    count = matches.length;
+    if (ms < best) best = ms;
+  }
+  return { label, ms: best, count, engine: 'Match' };
 }
 
 const emailGrammar = `wchar: any of (letter, digit, underscore, period, plus, hyphen)
