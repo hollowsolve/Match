@@ -146,6 +146,9 @@ export function compileToWasmBuffer(cp: CompiledProgram): ArrayBuffer {
   const nodeOffsets = new Map<CompiledOp, number>();
 
   function serializeFlatSteps(steps: FlatStep[]): number {
+    for (const st of steps) {
+      if (st.child && !nodeOffsets.has(st.child)) serializeNode(st.child);
+    }
     const off = pos;
     for (const st of steps) {
       switch (st.fop) {

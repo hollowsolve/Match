@@ -2,8 +2,8 @@ import { lex } from './lexer/lexer.js';
 import { parse as parseTokens } from './parser/parser.js';
 import { validate } from './validator/validator.js';
 import { execute, executePartial, find as findFn } from './executor/executor.js';
-import { compile, fastMatch, CompiledProgram } from './executor/fast.js';
-import { wasmFastMatchString, vmMatchTree, fastScan, fastScanBytes } from './executor/wasm.js';
+import { compile, fastMatch, CompiledProgram, compileToWasmBuffer } from './executor/fast.js';
+import { wasmFastMatchString, vmMatchTree, fastScan, fastScanBytes, fastMatchMany } from './executor/wasm.js';
 import type { ScanMatch, ByteScanMatch } from './executor/wasm.js';
 import { formatFailure, formatTree } from './diagnostics/formatter.js';
 import { MatchProgram, ParseOptions, RuleNode, UseNode } from './types/ast.js';
@@ -16,7 +16,7 @@ export { MatchResult, MatchSuccess, MatchFailure, PartialResult, RuleMatch } fro
 export { ParseError } from './types/error.js';
 export { formatFailure, formatTree } from './diagnostics/formatter.js';
 export { FindMatch, find } from './executor/executor.js';
-export { compile, fastMatch, CompiledProgram } from './executor/fast.js';
+export { compile, fastMatch, CompiledProgram, compileToWasmBuffer } from './executor/fast.js';
 export { LineMatch, SearchError, SearchResult, SearchOptions, StreamSearchOptions, searchString, searchFile, searchFolder, searchFolderStream, searchStream, searchFileStream, formatSearchResults } from './search/search.js';
 export { vmMatch, vmMatchString } from './executor/vm-exec.js';
 export { vmCompile } from './executor/vm-compile.js';
@@ -198,6 +198,15 @@ export function tryParse(source: string, input: string, options?: ParseOptions):
 }
 // @api-try-parse-end
 
+export function matchMany(program: MatchProgram, inputs: string[]): boolean[] {
+  const cp: CompiledProgram | undefined = (program as any).__compiled;
+  if (cp) return fastMatchMany(cp, inputs);
+  const n = inputs.length;
+  const results = new Array<boolean>(n);
+  for (let i = 0; i < n; i++) results[i] = execute(program, inputs[i]).matched;
+  return results;
+}
+
 export interface ScanOptions {
   tree?: boolean;
 }
@@ -248,4 +257,10 @@ export function scanBytes(program: MatchProgram, input: Uint8Array, options?: Sc
     }
   }
   return results;
+}
+
+export function exportBytecode(program: MatchProgram): ArrayBuffer {
+  const cp: CompiledProgram | undefined = (program as any).__compiled;
+  if (!cp) throw new Error('Program has no compiled bytecode — call parse() first');
+  return compileToWasmBuffer(cp);
 }

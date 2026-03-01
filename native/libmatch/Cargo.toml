@@ -1,0 +1,17 @@
+[package]
+name = "match-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "match_ffi"
+
+[dependencies]
+memchr = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
