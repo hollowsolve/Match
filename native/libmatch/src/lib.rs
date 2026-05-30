@@ -2,6 +2,10 @@ extern crate alloc;
 
 use std::slice;
 use std::ptr;
+use std::ffi::CStr;
+use std::fs;
+use std::path::Path;
+use std::collections::HashSet;
 
 const OP_BYTE: u32 = 0;
 const OP_BYTE_RANGE: u32 = 1;
@@ -1262,4 +1266,279 @@ pub unsafe extern "C" fn match_scan_results_free(results: *mut MatchScanResults)
 #[no_mangle]
 pub extern "C" fn match_version() -> u32 {
     1
+}
+
+#[repr(C)]
+pub struct MatchLineMatch {
+    pub line: u32,
+    pub col: u32,
+    pub end_col: u32,
+}
+
+#[repr(C)]
+pub struct MatchFileResult {
+    pub file_path: *mut u8,
+    pub file_path_len: u32,
+    pub matches: *mut MatchLineMatch,
+    pub match_count: u32,
+    pub match_capacity: u32,
+}
+
+#[repr(C)]
+pub struct MatchSearchResults {
+    pub files: *mut MatchFileResult,
+    pub file_count: u32,
+    pub file_capacity: u32,
+    pub error_count: u32,
+}
+
+const BINARY_CHECK_BYTES: usize = 8192;
+
+fn is_binary(buf: &[u8]) -> bool {
+    let check_len = buf.len().min(BINARY_CHECK_BYTES);
+    buf[..check_len].contains(&0u8)
+}
+
+const SKIP_DIRS: &[&str] = &[
+    "node_modules", ".git", ".svn", ".hg",
+    "dist", "build", "out", "target",
+    ".next", ".nuxt", ".cache", "__pycache__",
+    "coverage", ".output", ".turbo",
+];
+
+fn search_file_inner(prog: &[u8], content: &[u8]) -> Vec<MatchLineMatch> {
+    let mut results = Vec::new();
+    let mut line_start = 0usize;
+    let mut line_num = 1u32;
+    let len = content.len();
+
+    loop {
+        let line_end = content[line_start..].iter().position(|&b| b == b'\n')
+            .map(|p| line_start + p)
+            .unwrap_or(len);
+        let line = &content[line_start..line_end];
+
+        let hits = scan_bytecode(prog, line);
+        for (s, e) in hits {
+            results.push(MatchLineMatch { line: line_num, col: s, end_col: e });
+        }
+
+        if line_end >= len { break; }
+        line_start = line_end + 1;
+        line_num += 1;
+    }
+
+    results
+}
+
+fn alloc_line_matches(matches: Vec<MatchLineMatch>) -> (*mut MatchLineMatch, u32, u32) {
+    let count = matches.len();
+    if count == 0 { return (ptr::null_mut(), 0, 0); }
+    unsafe {
+        let layout = std::alloc::Layout::array::<MatchLineMatch>(count).unwrap();
+        let p = std::alloc::alloc(layout) as *mut MatchLineMatch;
+        for (i, m) in matches.iter().enumerate() {
+            *p.add(i) = MatchLineMatch { line: m.line, col: m.col, end_col: m.end_col };
+        }
+        (p, count as u32, count as u32)
+    }
+}
+
+fn alloc_c_string(s: &str) -> (*mut u8, u32) {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len == 0 { return (ptr::null_mut(), 0); }
+    unsafe {
+        let layout = std::alloc::Layout::array::<u8>(len).unwrap();
+        let p = std::alloc::alloc(layout);
+        ptr::copy_nonoverlapping(bytes.as_ptr(), p, len);
+        (p, len as u32)
+    }
+}
+
+fn walk_dir(dir: &Path, seen: &mut HashSet<String>, prog: &[u8], glob_ext: Option<&str>, results: &mut Vec<MatchFileResult>, errors: &mut u32) {
+    let real = match fs::canonicalize(dir) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let key = real.to_string_lossy().to_string();
+    if seen.contains(&key) { return; }
+    seen.insert(key);
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if ft.is_dir() || ft.is_symlink() {
+            if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) { continue; }
+            if ft.is_symlink() {
+                match fs::metadata(entry.path()) {
+                    Ok(m) if m.is_dir() => {}
+                    _ => continue,
+                }
+            }
+            walk_dir(&entry.path(), seen, prog, glob_ext, results, errors);
+        } else if ft.is_file() {
+            if let Some(ext) = glob_ext {
+                if !name_str.ends_with(ext) { continue; }
+            }
+            match fs::read(entry.path()) {
+                Ok(buf) => {
+                    if is_binary(&buf) { continue; }
+                    let matches = search_file_inner(prog, &buf);
+                    if !matches.is_empty() {
+                        let path_str = entry.path().to_string_lossy().to_string();
+                        let (fp, fp_len) = alloc_c_string(&path_str);
+                        let (mp, mc, mcap) = alloc_line_matches(matches);
+                        results.push(MatchFileResult {
+                            file_path: fp, file_path_len: fp_len,
+                            matches: mp, match_count: mc, match_capacity: mcap,
+                        });
+                    }
+                }
+                Err(_) => { *errors += 1; }
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn match_search_file(
+    prog: *const MatchProgram,
+    path: *const i8,
+) -> *mut MatchSearchResults {
+    if prog.is_null() || path.is_null() { return ptr::null_mut(); }
+    let p = &*prog;
+    let c_str = CStr::from_ptr(path);
+    let path_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let content = match fs::read(path_str) {
+        Ok(b) => b,
+        Err(_) => {
+            let r = Box::new(MatchSearchResults {
+                files: ptr::null_mut(), file_count: 0, file_capacity: 0, error_count: 1,
+            });
+            return Box::into_raw(r);
+        }
+    };
+
+    if is_binary(&content) {
+        let r = Box::new(MatchSearchResults {
+            files: ptr::null_mut(), file_count: 0, file_capacity: 0, error_count: 0,
+        });
+        return Box::into_raw(r);
+    }
+
+    let matches = search_file_inner(&p.bytecode, &content);
+    if matches.is_empty() {
+        let r = Box::new(MatchSearchResults {
+            files: ptr::null_mut(), file_count: 0, file_capacity: 0, error_count: 0,
+        });
+        return Box::into_raw(r);
+    }
+
+    let (fp, fp_len) = alloc_c_string(path_str);
+    let (mp, mc, mcap) = alloc_line_matches(matches);
+
+    let layout = std::alloc::Layout::array::<MatchFileResult>(1).unwrap();
+    let files_ptr = std::alloc::alloc(layout) as *mut MatchFileResult;
+    *files_ptr = MatchFileResult {
+        file_path: fp, file_path_len: fp_len,
+        matches: mp, match_count: mc, match_capacity: mcap,
+    };
+
+    let r = Box::new(MatchSearchResults {
+        files: files_ptr, file_count: 1, file_capacity: 1, error_count: 0,
+    });
+    Box::into_raw(r)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn match_search_folder(
+    prog: *const MatchProgram,
+    path: *const i8,
+    glob: *const i8,
+) -> *mut MatchSearchResults {
+    if prog.is_null() || path.is_null() { return ptr::null_mut(); }
+    let p = &*prog;
+    let c_str = CStr::from_ptr(path);
+    let path_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let glob_ext = if !glob.is_null() {
+        let g = CStr::from_ptr(glob);
+        match g.to_str() {
+            Ok(s) if s.starts_with("*.") => Some(&s[1..]),
+            Ok(s) if s.starts_with('.') => Some(s),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let mut file_results: Vec<MatchFileResult> = Vec::new();
+    let mut errors = 0u32;
+    let mut seen = HashSet::new();
+
+    walk_dir(Path::new(path_str), &mut seen, &p.bytecode, glob_ext, &mut file_results, &mut errors);
+
+    let file_count = file_results.len();
+    let files_ptr = if file_count > 0 {
+        let layout = std::alloc::Layout::array::<MatchFileResult>(file_count).unwrap();
+        let fp = std::alloc::alloc(layout) as *mut MatchFileResult;
+        for (i, fr) in file_results.iter().enumerate() {
+            ptr::write(fp.add(i), MatchFileResult {
+                file_path: fr.file_path, file_path_len: fr.file_path_len,
+                matches: fr.matches, match_count: fr.match_count, match_capacity: fr.match_capacity,
+            });
+        }
+        // The structs hold raw pointers and have no Drop impl; their copies now
+        // live in `fp`. Drop the Vec normally to free its backing buffer —
+        // forgetting it would leak that allocation on every folder search.
+        drop(file_results);
+        fp
+    } else {
+        ptr::null_mut()
+    };
+
+    let r = Box::new(MatchSearchResults {
+        files: files_ptr, file_count: file_count as u32, file_capacity: file_count as u32,
+        error_count: errors,
+    });
+    Box::into_raw(r)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn match_search_results_free(results: *mut MatchSearchResults) {
+    if results.is_null() { return; }
+    let r = Box::from_raw(results);
+    for i in 0..r.file_count as usize {
+        let f = &*r.files.add(i);
+        if !f.file_path.is_null() && f.file_path_len > 0 {
+            let layout = std::alloc::Layout::array::<u8>(f.file_path_len as usize).unwrap();
+            std::alloc::dealloc(f.file_path, layout);
+        }
+        if !f.matches.is_null() && f.match_capacity > 0 {
+            let layout = std::alloc::Layout::array::<MatchLineMatch>(f.match_capacity as usize).unwrap();
+            std::alloc::dealloc(f.matches as *mut u8, layout);
+        }
+    }
+    if !r.files.is_null() && r.file_capacity > 0 {
+        let layout = std::alloc::Layout::array::<MatchFileResult>(r.file_capacity as usize).unwrap();
+        std::alloc::dealloc(r.files as *mut u8, layout);
+    }
 }

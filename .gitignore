@@ -5,3 +5,7 @@ BACKLOG.md
 ARCHIVE.md
 native/target/
 native/libmatch/target/
+
+# Python
+__pycache__/
+*.pyc

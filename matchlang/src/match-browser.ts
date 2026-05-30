@@ -3,6 +3,10 @@ import { parse as parseTokens } from '../../src/parser/parser.js'
 import { validate } from '../../src/validator/validator.js'
 import { execute, executePartial, find as findFn } from '../../src/executor/executor.js'
 import { formatFailure, formatTree } from '../../src/diagnostics/formatter.js'
+import { compile } from '../../src/executor/fast.js'
+import type { CompiledProgram } from '../../src/executor/fast.js'
+import { jitScanString } from '../../src/executor/wasm-jit.js'
+import type { ScanMatch as JitScanMatch } from '../../src/executor/wasm-jit.js'
 import type { MatchProgram } from '../../src/types/ast.js'
 import type { MatchResult, MatchSuccess, PartialResult, RuleMatch } from '../../src/types/result.js'
 
@@ -38,6 +42,7 @@ export function parse(source: string): MatchProgram {
   const tokens = lex(source)
   const program = parseTokens(tokens)
   validate(program)
+  ;(program as any).__compiled = compile(program)
   return program
 }
 
@@ -56,7 +61,18 @@ export function tryParse(source: string, input: string): MatchSuccess | PartialR
 }
 
 export function scan(program: MatchProgram, input: string, options?: ScanOptions): ScanMatch[] {
-  const results: ScanMatch[] = findFn(program, input).map(m => ({ start: m.start, end: m.end, text: m.text }))
+  const cp: CompiledProgram | undefined = (program as any).__compiled
+  let results: ScanMatch[]
+  if (cp) {
+    const jitResults = jitScanString(cp, input)
+    if (jitResults) {
+      results = jitResults
+    } else {
+      results = findFn(program, input).map(m => ({ start: m.start, end: m.end, text: m.text }))
+    }
+  } else {
+    results = findFn(program, input).map(m => ({ start: m.start, end: m.end, text: m.text }))
+  }
   if (options?.tree) {
     for (const r of results) {
       const slice = input.slice(r.start, r.end)

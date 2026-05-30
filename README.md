@@ -6,11 +6,29 @@ A pattern matching language that replaces regular expressions. [Website](https:/
 
 ## Install
 
+**Node.js** (ESM and CommonJS, Node 18+):
+
 ```
 npm install @hollowsolve/match
 ```
 
-ESM and CommonJS. Node 18+.
+**Python** (via C FFI):
+
+```bash
+cd native/libmatch && cargo build --release
+```
+
+```python
+from match_lang import load_bytecode
+prog = load_bytecode('pattern.bin')
+```
+
+**C / Rust** (shared library):
+
+```bash
+cd native/libmatch && cargo build --release
+# produces libmatch_ffi.dylib / .so / .dll
+```
 
 ## Quick start
 
@@ -69,6 +87,25 @@ import { parse, match } from '@hollowsolve/match'
 const program = parse('main: 4 digits then hyphen then 2 digits then hyphen then 2 digits')
 match(program, '2025-01-15')  // matched
 match(program, '25-1-5')      // failed
+```
+
+Batch matching:
+
+```js
+import { parse, matchMany } from '@hollowsolve/match'
+
+const program = parse('main: one or more digits')
+matchMany(program, ['42', 'abc', '7'])  // [true, false, true]
+```
+
+Export bytecode for cross-platform use:
+
+```js
+import { parse, exportBytecode } from '@hollowsolve/match'
+import fs from 'fs'
+
+const program = parse('main: one or more digits')
+fs.writeFileSync('digits.bin', Buffer.from(exportBytecode(program)))
 ```
 
 ---
@@ -306,15 +343,33 @@ const results = scan(program, input, { tree: true })
 results[0].tree  // RuleMatch with children, offsets, etc.
 ```
 
+### Batch matching
+
+```ts
+matchMany(program: MatchProgram, inputs: string[]): boolean[]
+```
+
+Match a compiled program against many inputs at once. Uses WASM JIT with shared memory for minimal overhead per input.
+
+### Bytecode export
+
+```ts
+exportBytecode(program: MatchProgram): ArrayBuffer
+```
+
+Serialize a compiled program to a portable bytecode buffer. The bytecode can be loaded by the Python bindings, C FFI library, or any runtime that implements the Match VM.
+
 ### File search
 
 ```ts
 searchFile(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
 searchFolder(program: MatchProgram, path: string, options?: SearchOptions): SearchResult
 searchFolderStream(program: MatchProgram, path: string, options?: SearchOptions): AsyncGenerator<LineMatch | SearchError>
+searchStream(program: MatchProgram, stream: Readable, options?: StreamSearchOptions): AsyncGenerator<LineMatch>
+searchFileStream(program: MatchProgram, path: string, options?: StreamSearchOptions): AsyncGenerator<LineMatch>
 ```
 
-Line-oriented search. `searchFolder` is recursive and skips binary files, hidden dirs, and `node_modules`. `searchFolderStream` yields results as it walks instead of buffering.
+Line-oriented search. `searchFolder` is recursive and skips binary files, hidden dirs, and `node_modules`. The `Stream` variants yield results as they walk instead of buffering — suitable for large directories and continuous input.
 
 ### Diagnostics
 
@@ -332,7 +387,7 @@ compile(program: MatchProgram): CompiledProgram
 fastMatch(cp: CompiledProgram, input: Uint8Array): number
 ```
 
-Boolean-only matching. Returns bytes consumed on success, `-1` on failure. Skips tree building entirely.
+Boolean-only matching. Returns bytes consumed on success, `-1` on failure. Skips tree building entirely. Normally you don't need to call this directly — `parse()` attaches a compiled program automatically and `match()`/`scan()` use it.
 
 ### Partial parsing
 
@@ -454,6 +509,67 @@ Full methodology and results: [matchlang.com/docs/api/benchmarks](https://matchl
 
 ---
 
+## Multi-language support
+
+Match patterns compile to a portable bytecode format. The Node.js package compiles grammars and exports bytecode; other languages load the bytecode and run it natively.
+
+### Python
+
+```python
+from match_lang import load_bytecode
+
+prog = load_bytecode('email.bin')
+
+prog.is_match('user@example.com')  # True
+prog.exec('hello')                 # bytes consumed, or -1
+prog.scan('Contact user@example.com or admin@test.org')
+# [(6, 22, 'user@example.com'), (27, 41, 'admin@test.org')]
+
+prog.scan_bytes(b'raw bytes here')  # [(start, end), ...]
+prog.scan_count('count matches')    # int
+
+prog.search_file('/path/to/file.log')
+# {'matches': [{'file': '...', 'matches': [{'line': 1, 'col': 6, 'end_col': 22}]}], 'errors': 0}
+
+prog.search_folder('/path/to/logs', glob='*.log')
+# same format, recursive directory walk
+```
+
+Requires the native library: `cd native/libmatch && cargo build --release`. Set `MATCH_LIB_PATH` to override the search path.
+
+### C FFI
+
+```c
+#include <stdint.h>
+
+// Load bytecode
+MatchProgram* match_program_from_bytecode(const uint8_t* bytecode, uint32_t len);
+void match_program_free(MatchProgram* prog);
+
+// Match
+int32_t match_exec(const MatchProgram* prog, const uint8_t* input, uint32_t len);
+int32_t match_is_match(const MatchProgram* prog, const uint8_t* input, uint32_t len);
+
+// Scan
+MatchScanResults* match_scan(const MatchProgram* prog, const uint8_t* input, uint32_t len);
+void match_scan_results_free(MatchScanResults* results);
+
+// File/folder search
+MatchSearchResults* match_search_file(const MatchProgram* prog, const char* path);
+MatchSearchResults* match_search_folder(const MatchProgram* prog, const char* path, const char* glob);
+void match_search_results_free(MatchSearchResults* results);
+```
+
+Build: `cd native/libmatch && cargo build --release` produces `libmatch_ffi.dylib` / `.so` / `.dll`.
+
+### Browser
+
+The browser build (`matchlang/src/match-browser.ts`) supports the same API as Node.js for in-memory operations: `parse`, `match`, `run`, `find`, `scan`. The `scan` function uses WASM JIT with SIMD acceleration when the browser supports it, falling back to the JS interpreter.
+
+File search is not available in browsers (no filesystem access).
+
+---
+
 ## Stability
 
 The following are stable public API as of v1.0:
@@ -461,6 +577,7 @@ The following are stable public API as of v1.0:
 - `MatchSuccess`, `MatchFailure`, `PartialResult`, `RuleMatch` — field names, types, and semantics
 - `formatFailure` output format — structure and field layout
 - All exported function signatures
+- Bytecode format — programs exported with `exportBytecode` will remain loadable
 
 These will not change in backward-incompatible ways without a major version bump.
 

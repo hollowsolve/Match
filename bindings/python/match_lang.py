@@ -77,9 +77,41 @@ def _setup_lib(lib):
     lib.match_version.argtypes = []
     lib.match_version.restype = ctypes.c_uint32
 
+    lib.match_search_file.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.match_search_file.restype = ctypes.c_void_p
+
+    lib.match_search_folder.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+    lib.match_search_folder.restype = ctypes.c_void_p
+
+    lib.match_search_results_free.argtypes = [ctypes.c_void_p]
+    lib.match_search_results_free.restype = None
+
 
 class MatchScanResult(ctypes.Structure):
     _fields_ = [("start", ctypes.c_uint32), ("end", ctypes.c_uint32)]
+
+
+class MatchLineMatch(ctypes.Structure):
+    _fields_ = [("line", ctypes.c_uint32), ("col", ctypes.c_uint32), ("end_col", ctypes.c_uint32)]
+
+
+class MatchFileResult(ctypes.Structure):
+    _fields_ = [
+        ("file_path", ctypes.POINTER(ctypes.c_uint8)),
+        ("file_path_len", ctypes.c_uint32),
+        ("matches", ctypes.POINTER(MatchLineMatch)),
+        ("match_count", ctypes.c_uint32),
+        ("match_capacity", ctypes.c_uint32),
+    ]
+
+
+class MatchSearchResults(ctypes.Structure):
+    _fields_ = [
+        ("files", ctypes.POINTER(MatchFileResult)),
+        ("file_count", ctypes.c_uint32),
+        ("file_capacity", ctypes.c_uint32),
+        ("error_count", ctypes.c_uint32),
+    ]
 
 
 class MatchScanResults(ctypes.Structure):
@@ -146,6 +178,35 @@ class Program:
         count = results.count
         self._lib.match_scan_results_free(results_ptr)
         return count
+
+    def search_file(self, path: str) -> dict:
+        path_bytes = path.encode("utf-8") + b"\0"
+        results_ptr = self._lib.match_search_file(self._ptr, path_bytes)
+        return self._parse_search_results(results_ptr)
+
+    def search_folder(self, path: str, glob: Optional[str] = None) -> dict:
+        path_bytes = path.encode("utf-8") + b"\0"
+        glob_bytes = (glob.encode("utf-8") + b"\0") if glob else None
+        results_ptr = self._lib.match_search_folder(self._ptr, path_bytes, glob_bytes)
+        return self._parse_search_results(results_ptr)
+
+    def _parse_search_results(self, results_ptr) -> dict:
+        if not results_ptr:
+            return {"matches": [], "errors": 0}
+        results = ctypes.cast(results_ptr, ctypes.POINTER(MatchSearchResults)).contents
+        out = []
+        for i in range(results.file_count):
+            f = results.files[i]
+            fp_bytes = bytes(bytearray(f.file_path[j] for j in range(f.file_path_len)))
+            file_path = fp_bytes.decode("utf-8", errors="replace")
+            file_matches = []
+            for j in range(f.match_count):
+                m = f.matches[j]
+                file_matches.append({"line": m.line, "col": m.col, "end_col": m.end_col})
+            out.append({"file": file_path, "matches": file_matches})
+        error_count = results.error_count
+        self._lib.match_search_results_free(results_ptr)
+        return {"matches": out, "errors": error_count}
 
 
 def load_bytecode(path: str) -> Program:
