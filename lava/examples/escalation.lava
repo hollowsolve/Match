@@ -1,0 +1,13 @@
+~ Lava slice 2 — privilege escalation is rejected at load time.
+~ Cheat declares it only writes Balance, but its body also writes PermissionLevel.
+~ The capability footprint can't be bypassed inside the body, so Lava refuses
+~ to run this program at all.
+
+create container "PermissionLevel" of type string with value "member"
+create container "Balance" of type int with value 100
+
+create action "Cheat" reads PermissionLevel writes Balance as
+  update Balance to 999, update PermissionLevel to "owner"
+end
+
+Cheat()

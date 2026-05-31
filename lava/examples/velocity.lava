@@ -1,0 +1,16 @@
+~ Lava slice 1 demo — containers, math, predicates, guarded effects
+
+create container "Velocity" of type int with value 0
+update Velocity to [Velocity + 10]
+update Velocity to [Velocity * 3]
+
+if (Velocity is 30) then print("velocity is thirty")
+else print("unexpected velocity")
+
+create constant "GravitationalForce" of type int with value -9
+create container "Label" of type string with value "anon"
+update Label to "player one"
+print(Label)
+
+~ predicate algebra composes
+if ((Velocity is 30) and (not (Label is "anon"))) then print("guards compose")

@@ -1,0 +1,17 @@
+~ Lava slice 2 — actions as flat sealed leaves with capability footprints
+
+create container "PermissionLevel" of type string with value "member"
+create container "AuditLog" of type string with value "init"
+
+~ Promote may touch ONLY what its header declares.
+~ It reads PermissionLevel, and writes PermissionLevel, AuditLog, and Console.
+create action "Promote" reads PermissionLevel writes PermissionLevel, AuditLog, Console as
+  if (PermissionLevel is "member") then update PermissionLevel to "admin", update AuditLog to "promoted to admin", print("promotion applied")
+  else print("no change")
+end
+
+~ The orchestrator (top level) holds ambient authority: it may read and call freely.
+print(PermissionLevel)
+Promote()
+print(PermissionLevel)
+print(AuditLog)
