@@ -17,18 +17,151 @@
 
 import { readFileSync } from 'node:fs';
 
+// Lava is built on match: a pattern's text-shape is compiled to a match grammar
+// and executed by the match VM we ship in ../dist.
+import { parse as matchParse, compile as matchCompile, fastMatch } from '../dist/esm/index.js';
+
 const KEYWORDS = new Set([
-  'create', 'container', 'constant', 'action', 'of', 'type', 'with', 'value',
+  'create', 'container', 'constant', 'action', 'pattern', 'of', 'type', 'with', 'value',
   'int', 'string', 'update', 'to', 'if', 'then', 'else',
   'and', 'or', 'not', 'is', 'print', 'Print',
   'reads', 'writes', 'as', 'end',
   'loop', 'until', 'times', 'break',
+  'extract', 'from', 'start', 'stop', 'at', 'after', 'before', 'char',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 const BUILTIN_ORIGINS = new Set(['Console']);
 
 class LavaError extends Error {}
 class BreakSignal {} // control-flow sentinel for `break`, caught by the enclosing loop
+
+// ---------- match dialect ----------
+// Lava's pattern language is match under a strict dialect:
+//   - no quoted character literals anywhere (markers included): `pipe`, not "|"
+//   - canonical name per byte: `minus` not dash/hyphen, `period` not dot
+//   - `unreserved character` is the named class for letter/digit/-/./_/~
+const CANONICAL_CHARS = {
+  minus: '-', period: '.', underscore: '_', tilde: '~', pipe: '|',
+  colon: ':', semicolon: ';', comma: ',', slash: '/', backslash: '\\',
+  at: '@', hash: '#', dollar: '$', percent: '%', ampersand: '&',
+  asterisk: '*', plus: '+', equals: '=', question: '?', caret: '^',
+  backtick: '`', space: ' ', tab: '\t', exclamation: '!',
+  'double quote': '"', 'single quote': "'",
+  'open paren': '(', 'close paren': ')', 'open bracket': '[', 'close bracket': ']',
+  'open brace': '{', 'close brace': '}', 'less than': '<', 'greater than': '>',
+};
+// synonyms match accepts but Lava forbids → point at the one canonical spelling
+const FORBIDDEN_SYNONYM = { dash: 'minus', hyphen: 'minus', dot: 'period', bang: 'exclamation' };
+// canonical name → the name match's own grammar uses (match has no `minus`)
+const TO_MATCH_NAME = { minus: 'hyphen', period: 'period', exclamation: 'exclamation' };
+
+// Turn a Lava shape into a match grammar body. Word-level: letters/spaces form
+// words, parentheses pass through, everything else (quotes especially) is rejected.
+function shapeToMatchBody(shape, lineNo) {
+  const out = [];
+  let i = 0;
+  while (i < shape.length) {
+    const ch = shape[i];
+    if (ch === ' ' || ch === '\t') { i++; continue; }
+    if (ch === '(' || ch === ')') { out.push(ch); i++; continue; }
+    if (ch === '"') throw new LavaError(`Quoted literals are not allowed in patterns — use a character name (line ${lineNo})`);
+    if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
+      let w = ''; while (i < shape.length && /[A-Za-z0-9]/.test(shape[i])) w += shape[i++];
+      out.push({ word: w });
+      continue;
+    }
+    throw new LavaError(`Unexpected '${ch}' in pattern (line ${lineNo})`);
+  }
+  // reassemble into a flat token list of words/parens, then phrase-rewrite
+  const words = out.map(t => (typeof t === 'string' ? t : t.word));
+  let s = words.join(' ').replace(/\( /g, '(').replace(/ \)/g, ')');
+
+  // reject forbidden synonyms (whole-word)
+  for (const [bad, good] of Object.entries(FORBIDDEN_SYNONYM)) {
+    if (new RegExp(`\\b${bad}\\b`).test(s))
+      throw new LavaError(`'${bad}' is not allowed — use '${good}' (line ${lineNo})`);
+  }
+  // expand the named class, then map canonical names match doesn't share
+  s = s.replace(/\bunreserved character\b/g, '(letter or digit or hyphen or period or underscore or tilde)');
+  for (const [lava, m] of Object.entries(TO_MATCH_NAME)) s = s.replace(new RegExp(`\\b${lava}\\b`, 'g'), m);
+  return s;
+}
+
+function compileShape(shape, lineNo) {
+  const body = shapeToMatchBody(shape, lineNo);
+  let cp;
+  try { cp = matchCompile(matchParse('main: ' + body)); }
+  catch (e) { throw new LavaError(`pattern shape is not valid match: ${e.message} (line ${lineNo})`); }
+  return cp;
+}
+
+function markerChar(marker, lineNo) {
+  if (marker.type === 'char') return null; // positional, handled separately
+  const c = CANONICAL_CHARS[marker.name];
+  if (c === undefined) throw new LavaError(`'${marker.name}' is not a known character name (line ${lineNo})`);
+  return c;
+}
+
+function makeMarker(anchor, rest, lineNo) {
+  rest = rest.trim();
+  if (anchor !== 'at' && anchor !== 'after' && anchor !== 'before')
+    throw new LavaError(`Expected at/after/before in pattern anchor (line ${lineNo})`);
+  if (rest.startsWith('char ')) {
+    const n = parseInt(rest.slice(5).trim(), 10);
+    if (!Number.isInteger(n) || n < 1) throw new LavaError(`'char' needs a positive position (line ${lineNo})`);
+    return { anchor, marker: { type: 'char', position: n } };
+  }
+  if (/["']/.test(rest)) throw new LavaError(`Quoted literals are not allowed as markers — use a character name (line ${lineNo})`);
+  return { anchor, marker: { type: 'name', name: rest } };
+}
+
+// split on `sep` only at top paren-depth (so shapes like `any of (a, b)` stay whole)
+function splitTopLevel(text, sep) {
+  const parts = []; let depth = 0, cur = '';
+  for (const ch of text) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (ch === sep && depth === 0) { parts.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+const PAT_ENC = new TextEncoder();
+const PAT_DEC = new TextDecoder();
+
+// Anchor the line position in JS, shape the capture with the match VM.
+function applyPattern(def, text) {
+  let begin = 0;
+  if (def.start) {
+    const { anchor, marker } = def.start;
+    if (marker.type === 'char') begin = anchor === 'at' ? marker.position - 1 : marker.position;
+    else {
+      const ch = markerChar(marker, def.line);
+      const idx = text.indexOf(ch);
+      if (idx < 0) throw new LavaError(`pattern start marker '${marker.name}' not found in source`);
+      begin = anchor === 'after' ? idx + 1 : idx;
+    }
+  }
+  let regionEnd = text.length;
+  if (def.stop) {
+    const { anchor, marker } = def.stop;
+    if (marker.type === 'char') regionEnd = anchor === 'at' ? marker.position : marker.position - 1;
+    else {
+      const ch = markerChar(marker, def.line);
+      const idx = text.indexOf(ch, begin);
+      if (idx >= 0) regionEnd = anchor === 'at' ? idx + 1 : idx;
+    }
+  }
+  if (begin < 0 || begin > text.length || begin > regionEnd)
+    throw new LavaError(`pattern matched no region in source`);
+
+  const bytes = PAT_ENC.encode(text.slice(begin, regionEnd));
+  const consumed = fastMatch(def.cp, bytes);
+  if (consumed <= 0) throw new LavaError(`pattern shape did not match the source`);
+  return PAT_DEC.decode(bytes.slice(0, consumed));
+}
 
 // ---------- comment stripping (quote-aware) ----------
 function stripComment(line) {
@@ -228,6 +361,33 @@ class Parser {
     return { name, reads, writes };
   }
 
+  // extract <PatternName> from <source> — apply a pattern to a string source
+  parseExtract() {
+    this.expect('word', 'extract');
+    const words = [];
+    while (this.peek().type === 'word' && !this.isWord('from')) words.push(this.next().value);
+    if (words.length === 0) throw new LavaError(`Expected a pattern name after 'extract' (line ${this.peek().line})`);
+    this.expect('word', 'from');
+    const source = this.parseName();
+    return { kind: 'extract', pattern: words.join(' '), source };
+  }
+
+  // pattern body clauses: optional `start <at|after> M`, optional `stop <at|before> M`,
+  // and exactly one shape clause. Markers are canonical char names or `char N`.
+  parsePatternBody(bodyText, lineNo) {
+    const clauses = splitTopLevel(bodyText, ',').map(c => c.trim()).filter(Boolean);
+    let start = null, stop = null, shape = null;
+    for (const clause of clauses) {
+      const w = clause.split(/\s+/);
+      if (w[0] === 'start') start = makeMarker(w[1], w.slice(2).join(' '), lineNo);
+      else if (w[0] === 'stop') stop = makeMarker(w[1], w.slice(2).join(' '), lineNo);
+      else if (shape !== null) throw new LavaError(`A pattern may have only one shape (line ${lineNo})`);
+      else shape = clause;
+    }
+    if (!shape) throw new LavaError(`Pattern has no shape (line ${lineNo})`);
+    return { start, stop, cp: compileShape(shape, lineNo), shape, line: lineNo };
+  }
+
   // loop / loop until (cond) / loop n times / loop (create container ...) [until (cond)]
   parseLoopHeader() {
     this.expect('word', 'loop');
@@ -256,6 +416,7 @@ class Parser {
   }
   parsePrimary() {
     const tok = this.peek();
+    if (this.isWord('extract')) return this.parseExtract();
     if (tok.type === 'op' && tok.value === '√') { this.next(); return { kind: 'sqrt', operand: this.parsePrimary() }; }
     if (tok.type === 'op' && tok.value === '-') { this.next(); const n = this.expect('number'); return { kind: 'lit', type: 'int', value: -parseInt(n.value, 10) }; }
     if (tok.type === 'number') { this.next(); return { kind: 'lit', type: 'int', value: parseInt(tok.value, 10) }; }
@@ -282,6 +443,7 @@ function collectReadsWrites(stmts) {
   const reads = new Set(), writes = new Set();
   const expr = (n) => {
     if (n.kind === 'ref') reads.add(n.name);
+    else if (n.kind === 'extract') reads.add(n.source);
     else if (n.kind === 'binop') { expr(n.left); expr(n.right); }
     else if (n.kind === 'sqrt') expr(n.operand);
   };
@@ -305,7 +467,10 @@ function collectReadsWrites(stmts) {
 
 // ---------- interpreter ----------
 class Interpreter {
-  constructor() { this.env = new Map(); this.actions = new Map(); this.names = new Set(); this.constants = new Set(); }
+  constructor() {
+    this.env = new Map(); this.actions = new Map(); this.patterns = new Map();
+    this.names = new Set(); this.constants = new Set();
+  }
 
   run(source) {
     const raw = source.split('\n');
@@ -315,8 +480,8 @@ class Interpreter {
       if (text !== '') this.lines.push({ text, line: i + 1 });
     }
 
-    // pre-scan every declared name (including loop-local containers, which live
-    // on the loop header line) so footprints and multi-word refs resolve
+    // pre-scan every declared name (loop-local containers live on the loop
+    // header line) so footprints and multi-word refs resolve
     for (const { text } of this.lines) {
       const m = text.match(/create (container|constant) "([^"]+)"/);
       if (m) { this.names.add(m[2]); if (m[1] === 'constant') this.constants.add(m[2]); }
@@ -325,7 +490,14 @@ class Interpreter {
     this.cursor = 0;
     const units = this.readUnits(false);
 
-    // phase 1: hoist + validate every action (definitions are visible file-wide)
+    // phase 1a: compile every pattern (definitions are visible file-wide)
+    for (const u of units) {
+      if (u.kind !== 'pattern') continue;
+      const def = new Parser([], this.names).parsePatternBody(u.body, u.line);
+      this.patterns.set(u.name, def);
+    }
+
+    // phase 1b: hoist + validate every action
     for (const u of units) {
       if (u.kind !== 'action') continue;
       const hdr = new Parser(lexLine(u.header, u.line), this.names).parseActionHeader();
@@ -336,7 +508,7 @@ class Interpreter {
 
     // phase 2: run the orchestrator top to bottom
     for (const u of units) {
-      if (u.kind === 'action') continue;
+      if (u.kind === 'action' || u.kind === 'pattern') continue;
       const node = this.buildStatement(u, /*inAction*/false);
       try { this.exec(node); }
       catch (e) { if (e instanceof BreakSignal) throw new LavaError(`'break' outside a loop (line ${u.line})`); throw e; }
@@ -367,6 +539,24 @@ class Interpreter {
         continue;
       }
 
+      if (text === 'create pattern' || text.startsWith('create pattern ')) {
+        // header is `create pattern "name" as`; body runs until `end`
+        let header = text; this.cursor++;
+        while (!endsWithAs(header)) {
+          if (this.cursor >= this.lines.length) throw new LavaError(`Pattern header missing 'as' (line ${line})`);
+          header += ' ' + this.lines[this.cursor].text; this.cursor++;
+        }
+        const nameMatch = header.match(/create pattern "([^"]+)" as$/);
+        if (!nameMatch) throw new LavaError(`Malformed pattern header (line ${line})`);
+        const bodyLines = [];
+        while (this.cursor < this.lines.length && this.lines[this.cursor].text !== 'end')
+          bodyLines.push(this.lines[this.cursor++].text);
+        if (this.cursor >= this.lines.length) throw new LavaError(`Pattern missing 'end' (line ${line})`);
+        this.cursor++; // consume 'end'
+        units.push({ kind: 'pattern', name: nameMatch[1], body: bodyLines.join(' '), line });
+        continue;
+      }
+
       if (text === 'loop' || text.startsWith('loop ') || text.startsWith('loop(')) {
         const header = text; this.cursor++;
         const bodyUnits = this.readUnits(true);
@@ -389,6 +579,7 @@ class Interpreter {
   }
   buildStatement(u, inAction) {
     if (u.kind === 'action') throw new LavaError(`Cannot declare an action here (line ${u.line})`);
+    if (u.kind === 'pattern') throw new LavaError(`Cannot declare a pattern here (line ${u.line})`);
     if (u.kind === 'loop') {
       if (inAction) throw new LavaError(`Actions cannot loop (line ${u.line})`);
       const hdr = new Parser(lexLine(u.header, u.line), this.names).parseLoopHeader();
@@ -505,6 +696,14 @@ class Interpreter {
         const cell = this.env.get(node.name);
         if (!cell) throw new LavaError(`'${node.name}' is not declared`);
         return cell.value;
+      }
+      case 'extract': {
+        const def = this.patterns.get(node.pattern);
+        if (!def) throw new LavaError(`No pattern named '${node.pattern}'`);
+        const src = this.env.get(node.source);
+        if (!src) throw new LavaError(`'${node.source}' is not declared`);
+        if (src.value.type !== 'string') throw new LavaError(`pattern source '${node.source}' must be a string`);
+        return { type: 'string', value: applyPattern(def, src.value.value) };
       }
       case 'sqrt': return num(Math.sqrt(this.numeric(node.operand)));
       case 'binop': {

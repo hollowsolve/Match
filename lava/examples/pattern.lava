@@ -1,0 +1,27 @@
+~ Lava slice 4 — patterns compile to match and extract from text.
+~ No quoted literals anywhere: markers and shapes use canonical character names.
+
+create container "Record" of type string with value "|alice_99|admin|"
+
+~ the flagship pattern: the username sits between the first two pipes
+create pattern "GetUsername" as
+  start after pipe,
+  stop before pipe,
+  one or more unreserved character
+end
+
+~ a digits-only field by character position
+create pattern "FirstChar" as
+  start at char 2,
+  stop before pipe,
+  one or more unreserved character
+end
+
+print(extract GetUsername from Record)
+print(extract FirstChar from Record)
+
+~ patterns are read live; an action can use one if it declares the source
+create action "ShowUser" reads Record writes Console as
+  print(extract GetUsername from Record)
+end
+ShowUser()
