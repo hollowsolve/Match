@@ -1,5 +1,5 @@
 ~ A direct bound violation is rejected; the offending write is undone.
-create container "Credit" of type int at least 0 with value 10
+create container "Credit" of type int never less than 0 with value 10
 print(Credit)
-update Credit to -5     ~ violates `at least 0` — fails here, Credit stays 10
+update Credit to -5     ~ violates `never less than 0` — fails here, Credit stays 10
 print(Credit)          ~ never reached

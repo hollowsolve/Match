@@ -1,0 +1,30 @@
+~ Lava slice 11 — a container's states ARE named conditions over itself.
+~ No anonymous subject: every term is a named read. `is <state>` evaluates the
+~ state's own condition. Comparators are prose; equality is anchored on `is`.
+
+create container "Balance" of type int from states (
+  overdrawn if Balance less than 0,
+  low if Balance greater than or is 0 and Balance less than or is 20,
+  healthy if Balance greater than 20
+) with value 50
+
+~ a relational state — same construction, the subject is just another named read
+create container "CreditLimit" of type int with value 100
+create container "Exposure" of type int from states (
+  safe if Exposure less than CreditLimit,
+  maxed if Exposure greater than or is CreditLimit
+) with value 0
+
+if (Balance is healthy) then print("healthy")
+
+update Balance to 5
+if (Balance is low) then print("low")
+
+update Balance to -10
+if (Balance is overdrawn) then print("overdrawn")
+
+~ comparators work in any predicate, not just state conditions
+if (Balance less than 0) then print("negative")
+
+update Exposure to 100
+if (Exposure is maxed) then print("maxed out")

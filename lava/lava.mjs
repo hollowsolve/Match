@@ -33,7 +33,7 @@ const KEYWORDS = new Set([
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
   'UserInput', 'wait', 'synchronous', 'actions',
-  'least', 'most', 'never', 'above', 'below',
+  'never', 'less', 'greater', 'than',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
@@ -305,40 +305,57 @@ class Parser {
     this.expect('word', 'of'); this.expect('word', 'type');
     const types = this.parseType();
     const bound = this.parseBound(types); // optional refinement on an int container
+    const states = this.parseStates(name); // optional named-condition state set
     this.expect('word', 'with'); this.expect('word', 'value');
     const value = this.parseLiteral();
-    return { kind: 'create', isConst: w.value === 'constant', name, types, value, bound };
+    return { kind: 'create', isConst: w.value === 'constant', name, types, value, bound, states };
   }
 
-  // optional numeric bound between the type and `with value`. A bound is one or
-  // two checks; each is a literal (`at least N`) or relational (`never above C`).
-  //   at least N | at most N | between N and M | never above C | never below C
+  // optional bound, between the type and `with value`, using prose comparators:
+  //   never less than <N|C>    (value >= N|C — a minimum)
+  //   never greater than <N|C> (value <= N|C — a maximum)
+  // multiple clauses join with `and`. N is a literal, C another container.
   parseBound(types) {
-    const isBoundStart = this.isWord('at') || this.isWord('between') || this.isWord('never');
-    if (!isBoundStart) return null;
+    if (!this.isWord('never')) return null;
     if (!(types.length === 1 && types[0] === 'int'))
       throw new LavaError(`bounds apply only to 'int' containers (line ${this.peek().line})`);
     const checks = [];
-    if (this.eatWord('at')) {
-      if (this.eatWord('least')) checks.push({ side: 'min', value: this.parseBoundInt() });
-      else if (this.eatWord('most')) checks.push({ side: 'max', value: this.parseBoundInt() });
-      else throw new LavaError(`Expected 'least' or 'most' after 'at' (line ${this.peek().line})`);
-    } else if (this.eatWord('between')) {
-      checks.push({ side: 'min', value: this.parseBoundInt() });
-      this.expect('word', 'and');
-      checks.push({ side: 'max', value: this.parseBoundInt() });
-    } else if (this.eatWord('never')) {
-      if (this.eatWord('above')) checks.push({ side: 'max', ref: this.parseName() });
-      else if (this.eatWord('below')) checks.push({ side: 'min', ref: this.parseName() });
-      else throw new LavaError(`Expected 'above' or 'below' after 'never' (line ${this.peek().line})`);
-    }
+    do {
+      this.expect('word', 'never');
+      if (this.eatWord('less')) { this.expect('word', 'than'); checks.push(this.parseBoundOperand('min')); }
+      else if (this.eatWord('greater')) { this.expect('word', 'than'); checks.push(this.parseBoundOperand('max')); }
+      else throw new LavaError(`Expected 'less than' or 'greater than' after 'never' (line ${this.peek().line})`);
+    } while (this.eatWord('and'));
     return checks;
   }
-  parseBoundInt() {
-    let neg = false;
-    if (this.peek().type === 'op' && this.peek().value === '-') { this.next(); neg = true; }
-    const n = this.expect('number');
-    return (neg ? -1 : 1) * parseInt(n.value, 10);
+  parseBoundOperand(side) {
+    const t = this.peek();
+    if (t.type === 'number' || (t.type === 'op' && t.value === '-')) {
+      let neg = false;
+      if (t.type === 'op') { this.next(); neg = true; }
+      const n = this.expect('number');
+      return { side, value: (neg ? -1 : 1) * parseInt(n.value, 10) };
+    }
+    return { side, ref: this.parseName() };
+  }
+
+  // optional `from states ( <name> if <predicate>, … )`. Each state is a named
+  // condition over named reads (the container itself, or others). A state IS its
+  // condition — nothing implicit, no anonymous subject.
+  parseStates(selfName) {
+    if (!(this.isWord('from') && this.peek(1) && this.peek(1).value === 'states')) return null;
+    this.next(); this.next(); // from states
+    this.expect('(');
+    const defs = [];
+    do {
+      const nameWords = [];
+      while (this.peek().type === 'word' && !this.isWord('if')) nameWords.push(this.next().value);
+      if (nameWords.length === 0) throw new LavaError(`Expected a state name (line ${this.peek().line})`);
+      this.expect('word', 'if');
+      defs.push({ name: nameWords.join(' '), pred: this.parsePred() });
+    } while (this.match(','));
+    this.expect(')');
+    return defs;
   }
   parseType() {
     const types = [this.parseTypeWord()];
@@ -565,12 +582,37 @@ class Parser {
   parseNot() {
     if (this.eatWord('not')) return { kind: 'not', operand: this.parseNot() };
     if (this.peek().type === '(') { this.next(); const p = this.parsePred(); this.expect(')'); return p; }
-    const left = this.parseExpr(); this.expect('word', 'is');
-    // value comparison (literal RHS) vs state case-check (bare case names)
-    const t = this.peek();
-    if (t.type === 'string' || t.type === 'number' || (t.type === 'op' && t.value === '-') || t.type === '[')
-      return { kind: 'is', left, right: this.parseExpr() };
-    return { kind: 'isCase', left, cases: this.parseCaseExpr() };
+    const left = this.parseExpr();
+    const cmp = this.parseComparator();
+    if (cmp === null)
+      throw new LavaError(`Expected a comparator (is / less than / greater than) (line ${this.peek().line})`);
+    if (cmp === 'is') {
+      // `is <literal>` is value equality; `is <bare names>` is a state check
+      const t = this.peek();
+      if (t.type === 'string' || t.type === 'number' || (t.type === 'op' && t.value === '-') || t.type === '[')
+        return { kind: 'is', left, right: this.parseExpr() };
+      return { kind: 'isCase', left, cases: this.parseCaseExpr() };
+    }
+    return { kind: 'cmp', op: cmp, left, right: this.parseExpr() };
+  }
+
+  // prose comparators, equality anchored on `is`:
+  //   is | less than | greater than | less than or is | greater than or is
+  // The compound `... or is` is unambiguous: after `less/greater than`, a bare
+  // `or` can only begin the `or is` tail (a comparison still needs a right side).
+  parseComparator() {
+    if (this.eatWord('is')) return 'is';
+    if (this.eatWord('less')) {
+      this.expect('word', 'than');
+      if (this.isWord('or')) { this.next(); this.expect('word', 'is'); return 'le'; }
+      return 'lt';
+    }
+    if (this.eatWord('greater')) {
+      this.expect('word', 'than');
+      if (this.isWord('or')) { this.next(); this.expect('word', 'is'); return 'ge'; }
+      return 'gt';
+    }
+    return null;
   }
 
   // case expressions: bare case names under or/and/not/parens (no quotes)
@@ -630,7 +672,7 @@ function collectReadsWrites(stmts) {
     else if (n.kind === 'sqrt') expr(n.operand);
   };
   const pred = (n) => {
-    if (n.kind === 'is') { expr(n.left); expr(n.right); }
+    if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left); expr(n.right); }
     else if (n.kind === 'isCase') expr(n.left);
     else if (n.kind === 'and' || n.kind === 'or') { pred(n.left); pred(n.right); }
     else if (n.kind === 'not') pred(n.operand);
