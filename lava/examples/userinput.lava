@@ -1,0 +1,21 @@
+~ Lava slice 7 — UserInput: a readable origin, accepts with newline.
+~ Run interactively, or pipe input:  printf 'alice\n42\n' | node lava/lava.mjs lava/examples/userinput.lava
+
+create container "Name" of type string with value "anon"
+create container "Echo" of type string with value ""
+
+print("what is your name?")
+update Name to UserInput
+print(Name)
+
+~ a second line of input
+print("say something:")
+update Echo to UserInput
+print(Echo)
+
+~ UserInput is guarded like any read: an action must declare `reads UserInput`
+create action "Greet" reads UserInput writes Console as
+  print(UserInput)
+end
+print("type a greeting:")
+Greet()

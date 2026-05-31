@@ -107,7 +107,15 @@ names onto match (e.g. `minus` → match's `hyphen`). match itself is unchanged.
 
 Read/write asymmetry holds: reads use `from`, writes name the target with `of`.
 
-Not yet: `wait`, `UserInput`, synchronous actions.
+**Slice 7 — UserInput.**
+
+- `UserInput` is a read-only origin that yields one line of stdin (accepts with
+  newline). Use it anywhere a string value is expected: `update Name to UserInput`.
+- Origins are **direction-typed**: `UserInput` is read-only, `Console` is
+  write-only. An action that uses `UserInput` must declare `reads UserInput`;
+  declaring `writes UserInput` or `reads Console` is rejected at load time.
+
+Not yet: `wait`, synchronous actions.
 
 ## Run
 
@@ -119,4 +127,5 @@ node lava/lava.mjs lava/examples/loops.lava      # loops + break
 node lava/lava.mjs lava/examples/pattern.lava    # patterns via match
 node lava/lava.mjs lava/examples/classes.lava    # classes + states (live file reads)
 node lava/lava.mjs lava/examples/writes.lava     # overwrite + live read roundtrip
+printf 'alice\nhi\nyo\n' | node lava/lava.mjs lava/examples/userinput.lava  # UserInput
 ```

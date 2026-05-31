@@ -15,7 +15,7 @@
 //
 // Not yet: patterns, classes, states, loops, wait, filesystem, UserInput, match.
 
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, dirname } from 'node:path';
 
@@ -32,12 +32,34 @@ const KEYWORDS = new Set([
   'extract', 'from', 'start', 'stop', 'at', 'after', 'before', 'char',
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
+  'UserInput',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
-const BUILTIN_ORIGINS = new Set(['Console']);
+// origins are direction-typed: Console is write-only, UserInput is read-only.
+const READABLE_ORIGINS = new Set(['UserInput']);
+const WRITABLE_ORIGINS = new Set(['Console']);
 
 class LavaError extends Error {}
 class BreakSignal {} // control-flow sentinel for `break`, caught by the enclosing loop
+
+// Read one line from stdin synchronously (UserInput "accepts with newline").
+// Execution is top-to-bottom and single-threaded, so a blocking read fits the
+// model. Returns the line without its trailing newline; '' at EOF.
+function readLineSync() {
+  const buf = Buffer.alloc(1);
+  let line = '';
+  while (true) {
+    let n;
+    try { n = readSync(0, buf, 0, 1, null); }
+    catch (e) { if (e.code === 'EAGAIN') continue; if (e.code === 'EOF') break; throw e; }
+    if (n === 0) break;          // EOF
+    const ch = buf[0];
+    if (ch === 0x0A) break;      // newline ends the line
+    if (ch === 0x0D) continue;   // ignore CR
+    line += String.fromCharCode(ch);
+  }
+  return line;
+}
 
 // ---------- match dialect ----------
 // Lava's pattern language is match under a strict dialect:
@@ -445,6 +467,7 @@ class Parser {
   }
   parsePrimary() {
     const tok = this.peek();
+    if (this.isWord('UserInput')) { this.next(); return { kind: 'userinput' }; }
     if (this.isWord('extract')) return this.parseExtract();
     if (tok.type === 'op' && tok.value === '√') { this.next(); return { kind: 'sqrt', operand: this.parsePrimary() }; }
     if (tok.type === 'op' && tok.value === '-') { this.next(); const n = this.expect('number'); return { kind: 'lit', type: 'int', value: -parseInt(n.value, 10) }; }
@@ -525,6 +548,7 @@ function collectReadsWrites(stmts) {
   const reads = new Set(), writes = new Set();
   const expr = (n) => {
     if (n.kind === 'ref') reads.add(n.name);
+    else if (n.kind === 'userinput') reads.add('UserInput');
     else if (n.kind === 'extract') reads.add(n.source);
     else if (n.kind === 'read') reads.add(n.cls); // reading a class field charges the class
     else if (n.kind === 'binop') { expr(n.left); expr(n.right); }
@@ -729,14 +753,17 @@ class Interpreter {
     const errs = [];
     const declaredReads = new Set(hdr.reads), declaredWrites = new Set(hdr.writes);
 
-    // footprint names must resolve to a real container/constant or built-in origin
-    for (const r of declaredReads)
-      if (!this.names.has(r) && !BUILTIN_ORIGINS.has(r))
-        errs.push(`declares 'reads ${r}', which is not a known container, constant, or origin`);
+    // footprint names must resolve to a known name or a direction-correct origin
+    for (const r of declaredReads) {
+      if (WRITABLE_ORIGINS.has(r) && !READABLE_ORIGINS.has(r)) errs.push(`declares 'reads ${r}', but '${r}' is a write-only origin`);
+      else if (!this.names.has(r) && !READABLE_ORIGINS.has(r))
+        errs.push(`declares 'reads ${r}', which is not a known container, constant, or readable origin`);
+    }
     for (const w of declaredWrites) {
       if (this.constants.has(w)) errs.push(`declares 'writes ${w}', but '${w}' is a constant`);
-      else if (!this.names.has(w) && !BUILTIN_ORIGINS.has(w))
-        errs.push(`declares 'writes ${w}', which is not a known container or origin`);
+      else if (READABLE_ORIGINS.has(w) && !WRITABLE_ORIGINS.has(w)) errs.push(`declares 'writes ${w}', but '${w}' is a read-only origin`);
+      else if (!this.names.has(w) && !WRITABLE_ORIGINS.has(w))
+        errs.push(`declares 'writes ${w}', which is not a known container or writable origin`);
     }
 
     // body may only touch what the header declares (constants are ambient reads)
@@ -873,6 +900,7 @@ class Interpreter {
         return { type: 'string', value: applyPattern(def, src.value.value) };
       }
       case 'read': return { type: 'string', value: this.readField(node.cls, node.field) };
+      case 'userinput': return { type: 'string', value: readLineSync() };
       case 'sqrt': return num(Math.sqrt(this.numeric(node.operand)));
       case 'binop': {
         const a = this.numeric(node.left), b = this.numeric(node.right);
