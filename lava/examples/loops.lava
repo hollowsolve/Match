@@ -1,0 +1,24 @@
+~ Lava slice 3 — loops and break
+
+create container "Total" of type int with value 0
+
+~ fixed count, no exposed counter
+loop 3 times
+  update Total to [Total + 10]
+end
+print(Total)
+
+~ loop-local container, checked before each iteration
+loop (create container "n" of type int with value 0) until (n is 5)
+  update n to [n + 1]
+  print(n)
+end
+
+~ infinite loop with break
+loop
+  update Total to [Total + 1]
+  if (Total is 33) then break
+end
+print(Total)
+
+~ the loop-local n is out of scope here; Total survived

@@ -22,11 +22,13 @@ const KEYWORDS = new Set([
   'int', 'string', 'update', 'to', 'if', 'then', 'else',
   'and', 'or', 'not', 'is', 'print', 'Print',
   'reads', 'writes', 'as', 'end',
+  'loop', 'until', 'times', 'break',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 const BUILTIN_ORIGINS = new Set(['Console']);
 
 class LavaError extends Error {}
+class BreakSignal {} // control-flow sentinel for `break`, caught by the enclosing loop
 
 // ---------- comment stripping (quote-aware) ----------
 function stripComment(line) {
@@ -166,6 +168,11 @@ class Parser {
   }
   parseEffect() {
     const tok = this.peek();
+    if (this.isWord('break')) {
+      this.next();
+      if (this.inAction) throw new LavaError(`'break' cannot appear inside an action (line ${tok.line})`);
+      return { op: 'break' };
+    }
     if (tok.type === 'word' && (tok.value === 'print' || tok.value === 'Print')) {
       this.next(); this.expect('('); const expr = this.parseExpr(); this.expect(')');
       return { op: 'print', expr };
@@ -221,6 +228,21 @@ class Parser {
     return { name, reads, writes };
   }
 
+  // loop / loop until (cond) / loop n times / loop (create container ...) [until (cond)]
+  parseLoopHeader() {
+    this.expect('word', 'loop');
+    let local = null, cond = null, count = null, mode = 'infinite';
+    if (this.peek().type === '(') { this.next(); local = this.parseCreate(); this.expect(')'); }
+    if (this.eatWord('until')) {
+      this.expect('('); cond = this.parsePred(); this.expect(')'); mode = 'until';
+    } else if (this.peek().type === 'number') {
+      count = parseInt(this.next().value, 10); this.expect('word', 'times'); mode = 'times';
+    }
+    if (this.peek().type !== 'eol')
+      throw new LavaError(`Unexpected '${this.peek().value}' in loop header (line ${this.peek().line})`);
+    return { mode, count, cond, local };
+  }
+
   // expressions: at most one binary op per level; '[ ]' groups
   parseExpr() {
     const left = this.parsePrimary();
@@ -271,6 +293,7 @@ function collectReadsWrites(stmts) {
   const eff = (e) => {
     if (e.op === 'update') { writes.add(e.name); expr(e.expr); }
     else if (e.op === 'print') { writes.add('Console'); expr(e.expr); }
+    // 'break' / 'call' touch no state and never appear in an action body
   };
   const stmt = (s) => {
     if (s.kind === 'effects') s.effects.forEach(eff);
@@ -285,77 +308,94 @@ class Interpreter {
   constructor() { this.env = new Map(); this.actions = new Map(); this.names = new Set(); this.constants = new Set(); }
 
   run(source) {
-    const items = this.segment(source);
+    const raw = source.split('\n');
+    this.lines = [];
+    for (let i = 0; i < raw.length; i++) {
+      const text = stripComment(raw[i]).trim();
+      if (text !== '') this.lines.push({ text, line: i + 1 });
+    }
 
-    // pre-scan declared names so footprints and multi-word refs resolve
-    for (const it of items) {
-      if (it.kind !== 'stmt') continue;
-      const m = it.text.match(/^create (container|constant) "([^"]+)"/);
+    // pre-scan every declared name (including loop-local containers, which live
+    // on the loop header line) so footprints and multi-word refs resolve
+    for (const { text } of this.lines) {
+      const m = text.match(/create (container|constant) "([^"]+)"/);
       if (m) { this.names.add(m[2]); if (m[1] === 'constant') this.constants.add(m[2]); }
     }
 
-    // phase 1: hoist + validate every action
-    for (const it of items) {
-      if (it.kind !== 'action') continue;
-      const hdr = new Parser(lexLine(it.header, it.line), this.names).parseActionHeader();
-      const body = this.parseBlock(it.bodyLines, /*inAction*/true);
+    this.cursor = 0;
+    const units = this.readUnits(false);
+
+    // phase 1: hoist + validate every action (definitions are visible file-wide)
+    for (const u of units) {
+      if (u.kind !== 'action') continue;
+      const hdr = new Parser(lexLine(u.header, u.line), this.names).parseActionHeader();
+      const body = this.buildStatements(u.bodyUnits, /*inAction*/true);
       this.validateFootprint(hdr, body);
       this.actions.set(hdr.name, { reads: new Set(hdr.reads), writes: new Set(hdr.writes), body });
     }
 
     // phase 2: run the orchestrator top to bottom
-    for (const it of items) {
-      if (it.kind !== 'stmt') continue;
-      const stmt = new Parser(lexLine(it.text, it.line), this.names).parseStatement();
-      this.exec(stmt);
+    for (const u of units) {
+      if (u.kind === 'action') continue;
+      const node = this.buildStatement(u, /*inAction*/false);
+      try { this.exec(node); }
+      catch (e) { if (e instanceof BreakSignal) throw new LavaError(`'break' outside a loop (line ${u.line})`); throw e; }
     }
   }
 
-  // split source into ordered items: action blocks and statement lines
-  segment(source) {
-    const raw = source.split('\n');
-    const lines = [];
-    for (let i = 0; i < raw.length; i++) {
-      const text = stripComment(raw[i]).trim();
-      if (text !== '') lines.push({ text, line: i + 1 });
-    }
-    const items = [];
-    let k = 0;
-    while (k < lines.length) {
-      const { text, line } = lines[k];
-      if (text === 'create action' || text.startsWith('create action ')) {
-        let header = text;
-        while (!endsWithAs(header)) {
-          k++;
-          if (k >= lines.length) throw new LavaError(`Action header missing 'as' (line ${line})`);
-          header += ' ' + lines[k].text;
-        }
-        const bodyLines = [];
-        k++;
-        while (k < lines.length && lines[k].text !== 'end') { bodyLines.push(lines[k]); k++; }
-        if (k >= lines.length) throw new LavaError(`Action missing 'end' (line ${line})`);
-        items.push({ kind: 'action', header, line, bodyLines });
-        k++;
-      } else if ((text === 'else' || text.startsWith('else ')) && items.length && items[items.length - 1].kind === 'stmt') {
-        items[items.length - 1].text += ' ' + text;
-        k++;
-      } else {
-        items.push({ kind: 'stmt', text, line });
-        k++;
+  // Read an ordered list of units from the line cursor. `loop` and
+  // `create action` open blocks terminated by `end`; loops may nest.
+  // A leading `else` line continues the previous statement.
+  readUnits(stopAtEnd) {
+    const units = [];
+    while (this.cursor < this.lines.length) {
+      const { text, line } = this.lines[this.cursor];
+
+      if (text === 'end') {
+        if (stopAtEnd) { this.cursor++; return units; }
+        throw new LavaError(`Unexpected 'end' (line ${line})`);
       }
+
+      if (text === 'create action' || text.startsWith('create action ')) {
+        let header = text; this.cursor++;
+        while (!endsWithAs(header)) {
+          if (this.cursor >= this.lines.length) throw new LavaError(`Action header missing 'as' (line ${line})`);
+          header += ' ' + this.lines[this.cursor].text; this.cursor++;
+        }
+        const bodyUnits = this.readUnits(true);
+        units.push({ kind: 'action', header, line, bodyUnits });
+        continue;
+      }
+
+      if (text === 'loop' || text.startsWith('loop ') || text.startsWith('loop(')) {
+        const header = text; this.cursor++;
+        const bodyUnits = this.readUnits(true);
+        units.push({ kind: 'loop', header, line, bodyUnits });
+        continue;
+      }
+
+      if ((text === 'else' || text.startsWith('else ')) && units.length && units[units.length - 1].kind === 'stmt') {
+        units[units.length - 1].text += ' ' + text; this.cursor++; continue;
+      }
+
+      units.push({ kind: 'stmt', text, line }); this.cursor++;
     }
-    return items;
+    if (stopAtEnd) throw new LavaError(`Missing 'end'`);
+    return units;
   }
 
-  // parse a list of body lines into statement nodes (with else-continuation)
-  parseBlock(lines, inAction) {
-    const merged = [];
-    for (const { text, line } of lines) {
-      if ((text === 'else' || text.startsWith('else ')) && merged.length)
-        merged[merged.length - 1].text += ' ' + text;
-      else merged.push({ text, line });
+  buildStatements(units, inAction) {
+    return units.map(u => this.buildStatement(u, inAction));
+  }
+  buildStatement(u, inAction) {
+    if (u.kind === 'action') throw new LavaError(`Cannot declare an action here (line ${u.line})`);
+    if (u.kind === 'loop') {
+      if (inAction) throw new LavaError(`Actions cannot loop (line ${u.line})`);
+      const hdr = new Parser(lexLine(u.header, u.line), this.names).parseLoopHeader();
+      const body = this.buildStatements(u.bodyUnits, false);
+      return { kind: 'loop', ...hdr, body, line: u.line };
     }
-    return merged.map(m => new Parser(lexLine(m.text, m.line), this.names, inAction).parseStatement());
+    return new Parser(lexLine(u.text, u.line), this.names, inAction).parseStatement();
   }
 
   validateFootprint(hdr, body) {
@@ -399,10 +439,43 @@ class Interpreter {
         else if (stmt.elseE) stmt.elseE.forEach(e => this.effect(e));
         return;
       }
+      case 'loop': return this.runLoop(stmt);
     }
   }
 
+  runLoop(node) {
+    const CAP = 1_000_000;
+
+    // loop-local container: declared in env for the loop body, restored after
+    let localName = null, hadPrev = false, prev = null;
+    if (node.local) {
+      localName = node.local.name;
+      this.checkType(localName, node.local.types, node.local.value);
+      if (this.env.has(localName)) { hadPrev = true; prev = this.env.get(localName); }
+      this.env.set(localName, { types: node.local.types, value: node.local.value, isConst: false });
+    }
+
+    try {
+      if (node.mode === 'times') {
+        for (let c = 0; c < node.count; c++) this.runBody(node.body);
+      } else {
+        let i = 0;
+        while (true) {
+          if (node.mode === 'until' && this.evalPred(node.cond)) break; // checked before each iteration
+          if (i++ >= CAP) throw new LavaError(`loop exceeded ${CAP} iterations without 'break' (line ${node.line})`);
+          this.runBody(node.body);
+        }
+      }
+    } catch (e) {
+      if (!(e instanceof BreakSignal)) throw e;
+    } finally {
+      if (localName) { if (hadPrev) this.env.set(localName, prev); else this.env.delete(localName); }
+    }
+  }
+  runBody(body) { for (const s of body) this.exec(s); }
+
   effect(e) {
+    if (e.op === 'break') throw new BreakSignal();
     if (e.op === 'print') { process.stdout.write(String(this.evalExpr(e.expr).value) + '\n'); return; }
     if (e.op === 'update') {
       const cell = this.env.get(e.name);
