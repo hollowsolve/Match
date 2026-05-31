@@ -9,3 +9,4 @@ native/libmatch/target/
 # Python
 __pycache__/
 *.pyc
+.DS_Store
