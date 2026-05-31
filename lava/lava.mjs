@@ -201,6 +201,18 @@ function stripComment(line) {
   return line;
 }
 
+// net `(` minus `)` outside quotes — used to continue a parenthesized statement
+// across physical lines.
+function parenDepth(s) {
+  let d = 0, q = false;
+  for (const c of s) {
+    if (c === '"') q = !q;
+    else if (!q && c === '(') d++;
+    else if (!q && c === ')') d--;
+  }
+  return d;
+}
+
 // ---------- lexer (one logical line at a time) ----------
 function isLetter(ch) {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
@@ -881,7 +893,11 @@ class Interpreter {
         units[units.length - 1].text += ' ' + text; this.cursor++; continue;
       }
 
-      units.push({ kind: 'stmt', text, line }); this.cursor++;
+      // A statement with an unbalanced `(` — e.g. a `from states ( … )` block —
+      // continues onto following lines until the parens close.
+      let stext = text; this.cursor++;
+      while (parenDepth(stext) > 0 && this.cursor < this.lines.length) stext += ' ' + this.lines[this.cursor++].text;
+      units.push({ kind: 'stmt', text: stext, line });
     }
     if (stopAtEnd) throw new LavaError(`Missing 'end'`);
     return units;
@@ -939,7 +955,7 @@ class Interpreter {
       case 'create': {
         if (this.env.has(stmt.name)) throw new LavaError(`'${stmt.name}' already exists`);
         this.checkType(stmt.name, stmt.types, stmt.value);
-        const cell = { types: stmt.types, value: stmt.value, isConst: stmt.isConst, bound: stmt.bound || null };
+        const cell = { types: stmt.types, value: stmt.value, isConst: stmt.isConst, bound: stmt.bound || null, states: stmt.states || null };
         this.env.set(stmt.name, cell);
         if (cell.bound) this.checkBound(stmt.name, cell); // initial value must satisfy
         return;
@@ -1177,12 +1193,36 @@ class Interpreter {
         if (l.type !== r.type) throw new LavaError(`Type mismatch: cannot compare ${l.type} with ${r.type}`);
         return l.value === r.value;
       }
+      case 'cmp': {
+        const a = this.numeric(node.left), b = this.numeric(node.right);
+        if (node.op === 'lt') return a < b;
+        if (node.op === 'gt') return a > b;
+        if (node.op === 'le') return a <= b;
+        if (node.op === 'ge') return a >= b;
+        return false;
+      }
       case 'isCase': {
+        const condStates = node.left.kind === 'ref'
+          ? (this.env.get(node.left.name) || {}).states : null;
+        if (condStates) return this.evalCaseCond(node.cases, condStates, node.left.name);
         const lv = this.evalExpr(node.left);
         if (lv.type !== 'string') throw new LavaError(`'is <case>' needs a state or string on the left, got ${lv.type}`);
         let validCases = null;
         if (node.left.kind === 'read') validCases = this.states.get(node.left.cls + ' ' + node.left.field) || null;
         return this.evalCase(node.cases, lv.value, validCases);
+      }
+    }
+  }
+  // condition-states (containers): a state name resolves to its declared predicate
+  evalCaseCond(c, states, owner) {
+    switch (c.op) {
+      case 'or': return this.evalCaseCond(c.left, states, owner) || this.evalCaseCond(c.right, states, owner);
+      case 'and': return this.evalCaseCond(c.left, states, owner) && this.evalCaseCond(c.right, states, owner);
+      case 'not': return !this.evalCaseCond(c.operand, states, owner);
+      case 'case': {
+        const st = states.find(s => s.name === c.name);
+        if (!st) throw new LavaError(`'${c.name}' is not a declared state of '${owner}'`);
+        return this.evalPred(st.pred);
       }
     }
   }

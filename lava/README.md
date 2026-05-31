@@ -302,16 +302,3 @@ Name()                                          ~ action / synchronous-block cal
 
 ---
 
-## Lineage
-
-Lava is the third in a line, all chasing the same thing — erase the gap between
-the shape of a computation and the thing that runs:
-
-- **[match](../README.md)** — kill the translation layer for patterns. The name
-  *is* the character (`pipe`, not `\|`).
-- **statemap** — recover a formal, checkable map of how a system holds state,
-  from code that was never built to hold one. It must detect drift because the
-  map and the code are two artifacts.
-- **Lava** — make the code *be* the map, so there's nothing to drift. Statemap's
-  deepest idea (enforceable invariants) lives here as `bounds`, in the one place
-  it cannot lie: the declaration.
