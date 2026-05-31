@@ -1,0 +1,24 @@
+~ Lava slice 10 — bounds: refinements declared on a container.
+~ A bound is part of the container's identity, so the bad state cannot exist.
+
+~ literal bound: balance can never go negative
+create container "Credit" of type int at least 0 with value 100
+
+~ relational bound: a hold can never exceed the credit backing it
+create container "Hold" of type int never above Credit with value 0
+
+~ legal moves
+update Credit to [Credit - 40]      ~ 60, still >= 0
+update Hold to 60                    ~ 60, not above Credit (60)
+print(Credit)
+print(Hold)
+
+~ a guarded effect that respects the bound
+if (Credit is 60) then update Hold to [Hold - 10]
+print(Hold)
+
+~ the bad state is structurally impossible. The next line, if run, fails:
+~   update Credit to -5            ~ would violate `at least 0`
+~   update Hold to 999             ~ would violate `never above Credit`
+~ See bounds-violation.lava for the rejection, and bounds-atomic.lava for how
+~ a synchronous block may pass through an intermediate dip and still commit.

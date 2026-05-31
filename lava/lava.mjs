@@ -33,6 +33,7 @@ const KEYWORDS = new Set([
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
   'UserInput', 'wait', 'synchronous', 'actions',
+  'least', 'most', 'never', 'above', 'below',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
@@ -303,9 +304,41 @@ class Parser {
     const name = this.expect('string').value;
     this.expect('word', 'of'); this.expect('word', 'type');
     const types = this.parseType();
+    const bound = this.parseBound(types); // optional refinement on an int container
     this.expect('word', 'with'); this.expect('word', 'value');
     const value = this.parseLiteral();
-    return { kind: 'create', isConst: w.value === 'constant', name, types, value };
+    return { kind: 'create', isConst: w.value === 'constant', name, types, value, bound };
+  }
+
+  // optional numeric bound between the type and `with value`. A bound is one or
+  // two checks; each is a literal (`at least N`) or relational (`never above C`).
+  //   at least N | at most N | between N and M | never above C | never below C
+  parseBound(types) {
+    const isBoundStart = this.isWord('at') || this.isWord('between') || this.isWord('never');
+    if (!isBoundStart) return null;
+    if (!(types.length === 1 && types[0] === 'int'))
+      throw new LavaError(`bounds apply only to 'int' containers (line ${this.peek().line})`);
+    const checks = [];
+    if (this.eatWord('at')) {
+      if (this.eatWord('least')) checks.push({ side: 'min', value: this.parseBoundInt() });
+      else if (this.eatWord('most')) checks.push({ side: 'max', value: this.parseBoundInt() });
+      else throw new LavaError(`Expected 'least' or 'most' after 'at' (line ${this.peek().line})`);
+    } else if (this.eatWord('between')) {
+      checks.push({ side: 'min', value: this.parseBoundInt() });
+      this.expect('word', 'and');
+      checks.push({ side: 'max', value: this.parseBoundInt() });
+    } else if (this.eatWord('never')) {
+      if (this.eatWord('above')) checks.push({ side: 'max', ref: this.parseName() });
+      else if (this.eatWord('below')) checks.push({ side: 'min', ref: this.parseName() });
+      else throw new LavaError(`Expected 'above' or 'below' after 'never' (line ${this.peek().line})`);
+    }
+    return checks;
+  }
+  parseBoundInt() {
+    let neg = false;
+    if (this.peek().type === 'op' && this.peek().value === '-') { this.next(); neg = true; }
+    const n = this.expect('number');
+    return (neg ? -1 : 1) * parseInt(n.value, 10);
   }
   parseType() {
     const types = [this.parseTypeWord()];
@@ -864,7 +897,9 @@ class Interpreter {
       case 'create': {
         if (this.env.has(stmt.name)) throw new LavaError(`'${stmt.name}' already exists`);
         this.checkType(stmt.name, stmt.types, stmt.value);
-        this.env.set(stmt.name, { types: stmt.types, value: stmt.value, isConst: stmt.isConst });
+        const cell = { types: stmt.types, value: stmt.value, isConst: stmt.isConst, bound: stmt.bound || null };
+        this.env.set(stmt.name, cell);
+        if (cell.bound) this.checkBound(stmt.name, cell); // initial value must satisfy
         return;
       }
       case 'effects': return stmt.effects.forEach(e => this.effect(e));
@@ -950,8 +985,16 @@ class Interpreter {
       if (cell.isConst) throw new LavaError(`'${e.name}' is a constant and cannot be updated`);
       const v = this.evalExpr(e.expr);
       this.checkType(e.name, cell.types, v);
+      const old = cell.value;
       cell.value = v;
-      if (!this.deferWake) this.wake(); // a mutation may release suspended waits
+      // Outside a transaction, bounds hold after every write; a violation undoes
+      // this one write and fails. Inside a synchronous block (deferWake > 0)
+      // bounds are checked once at commit, so intermediate states may dip.
+      if (!this.deferWake) {
+        try { this.checkAllBounds(); }
+        catch (err) { cell.value = old; throw err; }
+        this.wake(); // a mutation may release suspended waits
+      }
       return;
     }
     if (e.op === 'overwrite') { this.overwrite(e.target, this.evalExpr(e.value)); return; }
@@ -974,6 +1017,7 @@ class Interpreter {
     this.deferWake++;
     try {
       for (const name of def.calls) this.actions.get(name).body.forEach(s => this.exec(s));
+      this.checkAllBounds(); // consistency is checked on the COMMITTED state only
     } catch (e) {
       for (const [k, v] of snapshot) { const c = this.env.get(k); if (c) c.value = v; }
       this.deferWake--;
@@ -981,6 +1025,32 @@ class Interpreter {
     }
     this.deferWake--;
     this.wake(); // single wake after the whole transaction lands
+  }
+
+  // A bound is a refinement on an int container: at least / at most a literal,
+  // or never above / below another container. Checked after every write outside
+  // a transaction, and once at commit inside one — so the bad state is never
+  // observable. (A relational bound reads its reference for validation only;
+  // that is language-level enforcement, not part of the action's footprint.)
+  checkBound(name, cell) {
+    if (!cell.bound) return;
+    const v = cell.value.value;
+    for (const chk of cell.bound) {
+      let limit, label;
+      if (chk.ref !== undefined) {
+        const r = this.env.get(chk.ref);
+        if (!r) throw new LavaError(`bound on '${name}' references unknown container '${chk.ref}'`);
+        if (r.value.type !== 'int') throw new LavaError(`bound reference '${chk.ref}' must be an int container`);
+        limit = r.value.value; label = `${chk.ref} (${limit})`;
+      } else { limit = chk.value; label = `${limit}`; }
+      if (chk.side === 'min' && v < limit)
+        throw new LavaError(`'${name}' is ${v}, violating bound: must be at least ${label}`);
+      if (chk.side === 'max' && v > limit)
+        throw new LavaError(`'${name}' is ${v}, violating bound: must be at most ${label}`);
+    }
+  }
+  checkAllBounds() {
+    for (const [name, cell] of this.env) if (cell.bound) this.checkBound(name, cell);
   }
 
   // filesystem write: contents replaces the file; name renames it; Line [n]

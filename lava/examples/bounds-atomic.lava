@@ -1,0 +1,26 @@
+~ Consistency falls out of bounds + synchronous actions:
+~ a transaction may pass through an intermediate that violates a relational
+~ bound, as long as the COMMITTED state is consistent. Checked at commit only.
+
+create container "Credit" of type int at least 0 with value 100
+create container "Hold" of type int never above Credit with value 100
+
+~ Lower Credit first, then Hold. The intermediate (Credit 50, Hold 100) breaks
+~ `Hold never above Credit` — but it's never committed, so the block succeeds.
+create action "DropCredit" writes Credit as
+  update Credit to 50
+end
+create action "DropHold" writes Hold as
+  update Hold to 50
+end
+
+create synchronous actions "Rebalance" as
+  DropCredit(),
+  DropHold()
+end
+
+print("before")
+Rebalance()
+print("after")
+print(Credit)
+print(Hold)

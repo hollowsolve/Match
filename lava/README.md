@@ -135,6 +135,23 @@ names onto match (e.g. `minus` → match's `hyphen`). match itself is unchanged.
   rolled back — an OS-level limit.)
 - a synchronous block may not nest another; calling an unknown action is rejected.
 
+**Slice 10 — bounds (invariants on containers).**
+
+- a numeric refinement declared between the type and `with value`, so a bound is
+  part of the container's identity — there is nothing for it to drift from:
+  - `of type int at least <N>` / `at most <N>` / `between <N> and <M>` — literal
+  - `of type int never above <Container>` / `never below <Container>` — relational
+- the initial value must satisfy the bound; every `update` is checked, and a
+  violation undoes that write and fails (failure-is-a-state).
+- a relational bound reads its reference for validation only — that is
+  language-level enforcement, **not** part of an action's footprint (an action
+  that writes a bounded container needs only `writes <it>`).
+- inside a synchronous block, bounds are checked **once at commit**, so a
+  transaction may pass through an intermediate that violates a relational bound
+  as long as the committed state is consistent — ACID-Consistency, emergent from
+  bounds + synchronous actions.
+- bounds apply only to `int` containers.
+
 Not yet: timed / `UserInput`-driven waits.
 
 ## Run
@@ -150,4 +167,7 @@ node lava/lava.mjs lava/examples/writes.lava     # overwrite + live read roundtr
 printf 'alice\nhi\nyo\n' | node lava/lava.mjs lava/examples/userinput.lava  # UserInput
 node lava/lava.mjs lava/examples/wait.lava       # reactive wait: suspend, wake, cascade
 node lava/lava.mjs lava/examples/sync.lava       # synchronous actions: atomic transaction
+node lava/lava.mjs lava/examples/bounds.lava     # bounds: invariants on containers
+node lava/lava.mjs lava/examples/bounds-atomic.lava       # consistency: dip then commit
+node lava/lava.mjs lava/examples/bounds-violation.lava    # a violation is rejected
 ```
