@@ -16,6 +16,8 @@
 // Not yet: patterns, classes, states, loops, wait, filesystem, UserInput, match.
 
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join, dirname } from 'node:path';
 
 // Lava is built on match: a pattern's text-shape is compiled to a match grammar
 // and executed by the match VM we ship in ../dist.
@@ -28,6 +30,7 @@ const KEYWORDS = new Set([
   'reads', 'writes', 'as', 'end',
   'loop', 'until', 'times', 'break',
   'extract', 'from', 'start', 'stop', 'at', 'after', 'before', 'char',
+  'class', 'where', 'state', 'states',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 const BUILTIN_ORIGINS = new Set(['Console']);
@@ -422,7 +425,12 @@ class Parser {
     if (tok.type === 'number') { this.next(); return { kind: 'lit', type: 'int', value: parseInt(tok.value, 10) }; }
     if (tok.type === 'string') { this.next(); return { kind: 'lit', type: 'string', value: tok.value }; }
     if (tok.type === '[') { this.next(); const e = this.parseExpr(); this.expect(']'); return e; }
-    if (tok.type === 'word' && !KEYWORDS.has(tok.value)) return { kind: 'ref', name: this.parseName() };
+    if (tok.type === 'word' && !KEYWORDS.has(tok.value)) {
+      const name = this.parseName();
+      // `<field> from <class>` is a live class read; otherwise a container ref
+      if (this.isWord('from')) { this.next(); const cls = this.parseName(); return { kind: 'read', field: name, cls }; }
+      return { kind: 'ref', name };
+    }
     throw new LavaError(`Expected a value (line ${tok.line}, col ${tok.col})`);
   }
 
@@ -433,9 +441,57 @@ class Parser {
   parseNot() {
     if (this.eatWord('not')) return { kind: 'not', operand: this.parseNot() };
     if (this.peek().type === '(') { this.next(); const p = this.parsePred(); this.expect(')'); return p; }
-    const left = this.parseExpr(); this.expect('word', 'is'); const right = this.parseExpr();
-    return { kind: 'is', left, right };
+    const left = this.parseExpr(); this.expect('word', 'is');
+    // value comparison (literal RHS) vs state case-check (bare case names)
+    const t = this.peek();
+    if (t.type === 'string' || t.type === 'number' || (t.type === 'op' && t.value === '-') || t.type === '[')
+      return { kind: 'is', left, right: this.parseExpr() };
+    return { kind: 'isCase', left, cases: this.parseCaseExpr() };
   }
+
+  // case expressions: bare case names under or/and/not/parens (no quotes)
+  parseCaseExpr() { return this.parseCaseOr(); }
+  parseCaseOr() { let l = this.parseCaseAnd(); while (this.isWord('or')) { this.next(); l = { op: 'or', left: l, right: this.parseCaseAnd() }; } return l; }
+  parseCaseAnd() { let l = this.parseCaseNot(); while (this.isWord('and')) { this.next(); l = { op: 'and', left: l, right: this.parseCaseNot() }; } return l; }
+  parseCaseNot() {
+    if (this.eatWord('not')) return { op: 'not', operand: this.parseCaseNot() };
+    if (this.peek().type === '(') { this.next(); const p = this.parseCaseOr(); this.expect(')'); return p; }
+    const words = [];
+    while (this.peek().type === 'word' && !this.isWord('or') && !this.isWord('and')) words.push(this.next().value);
+    if (words.length === 0) throw new LavaError(`Expected a case name (line ${this.peek().line})`);
+    return { op: 'case', name: words.join(' ') };
+  }
+
+  // create class "Name" from "path" where "Field" is Pattern, ...
+  parseClassDecl() {
+    this.expect('word', 'create'); this.expect('word', 'class');
+    const name = this.expect('string').value;
+    this.expect('word', 'from');
+    const path = this.expect('string').value;
+    this.expect('word', 'where');
+    const fields = [];
+    do {
+      const field = this.expect('string').value;
+      this.expect('word', 'is');
+      const pattern = this.parseName();
+      fields.push([field, pattern]);
+    } while (this.match(','));
+    return { name, path, fields };
+  }
+
+  // create state "Name" from class ClassName with states "Case", ...
+  parseStateDecl() {
+    this.expect('word', 'create'); this.expect('word', 'state');
+    const name = this.expect('string').value;
+    this.expect('word', 'from'); this.expect('word', 'class');
+    const cls = this.parseName();
+    this.expect('word', 'with'); this.expect('word', 'states');
+    const cases = [this.expect('string').value];
+    while (this.match(',')) cases.push(this.expect('string').value);
+    return { name, cls, cases };
+  }
+
+  match(type) { if (this.peek().type === type) { this.next(); return true; } return false; }
 }
 
 // ---------- capability analysis ----------
@@ -444,11 +500,13 @@ function collectReadsWrites(stmts) {
   const expr = (n) => {
     if (n.kind === 'ref') reads.add(n.name);
     else if (n.kind === 'extract') reads.add(n.source);
+    else if (n.kind === 'read') reads.add(n.cls); // reading a class field charges the class
     else if (n.kind === 'binop') { expr(n.left); expr(n.right); }
     else if (n.kind === 'sqrt') expr(n.operand);
   };
   const pred = (n) => {
     if (n.kind === 'is') { expr(n.left); expr(n.right); }
+    else if (n.kind === 'isCase') expr(n.left);
     else if (n.kind === 'and' || n.kind === 'or') { pred(n.left); pred(n.right); }
     else if (n.kind === 'not') pred(n.operand);
   };
@@ -467,9 +525,11 @@ function collectReadsWrites(stmts) {
 
 // ---------- interpreter ----------
 class Interpreter {
-  constructor() {
+  constructor(baseDir = '.') {
     this.env = new Map(); this.actions = new Map(); this.patterns = new Map();
+    this.classes = new Map(); this.states = new Map();
     this.names = new Set(); this.constants = new Set();
+    this.baseDir = baseDir;
   }
 
   run(source) {
@@ -490,6 +550,17 @@ class Interpreter {
     this.cursor = 0;
     const units = this.readUnits(false);
 
+    // register pattern / class / field / state names so footprints and
+    // multi-word references resolve regardless of declaration order
+    for (const u of units) {
+      if (u.kind === 'pattern') this.names.add(u.name);
+      else if (u.kind === 'class' || u.kind === 'state') {
+        const quoted = [...u.text.matchAll(/"([^"]*)"/g)].map(m => m[1]);
+        if (u.kind === 'class') { this.names.add(quoted[0]); quoted.slice(2).forEach(f => this.names.add(f)); }
+        else this.names.add(quoted[0]); // state name (== its class field)
+      }
+    }
+
     // phase 1a: compile every pattern (definitions are visible file-wide)
     for (const u of units) {
       if (u.kind !== 'pattern') continue;
@@ -497,7 +568,29 @@ class Interpreter {
       this.patterns.set(u.name, def);
     }
 
-    // phase 1b: hoist + validate every action
+    // phase 1b: bind classes (fields are patterns applied to the file)
+    for (const u of units) {
+      if (u.kind !== 'class') continue;
+      const d = new Parser(lexLine(u.text, u.line), this.names).parseClassDecl();
+      const fields = new Map();
+      for (const [field, pattern] of d.fields) {
+        if (!this.patterns.has(pattern)) throw new LavaError(`class '${d.name}' field '${field}' uses unknown pattern '${pattern}' (line ${u.line})`);
+        fields.set(field, pattern);
+      }
+      this.classes.set(d.name, { path: d.path, fields });
+    }
+
+    // phase 1c: bind states (closed case-set over a class field)
+    for (const u of units) {
+      if (u.kind !== 'state') continue;
+      const d = new Parser(lexLine(u.text, u.line), this.names).parseStateDecl();
+      const cls = this.classes.get(d.cls);
+      if (!cls) throw new LavaError(`state '${d.name}' names unknown class '${d.cls}' (line ${u.line})`);
+      if (!cls.fields.has(d.name)) throw new LavaError(`state '${d.name}' has no matching field on class '${d.cls}' (line ${u.line})`);
+      this.states.set(d.cls + ' ' + d.name, new Set(d.cases));
+    }
+
+    // phase 1d: hoist + validate every action
     for (const u of units) {
       if (u.kind !== 'action') continue;
       const hdr = new Parser(lexLine(u.header, u.line), this.names).parseActionHeader();
@@ -508,7 +601,7 @@ class Interpreter {
 
     // phase 2: run the orchestrator top to bottom
     for (const u of units) {
-      if (u.kind === 'action' || u.kind === 'pattern') continue;
+      if (u.kind === 'action' || u.kind === 'pattern' || u.kind === 'class' || u.kind === 'state') continue;
       const node = this.buildStatement(u, /*inAction*/false);
       try { this.exec(node); }
       catch (e) { if (e instanceof BreakSignal) throw new LavaError(`'break' outside a loop (line ${u.line})`); throw e; }
@@ -557,6 +650,21 @@ class Interpreter {
         continue;
       }
 
+      // class/state declarations have no `end`: they continue while the
+      // accumulated text ends with a continuation token (`,`, `where`, `states`)
+      if (text === 'create class' || text.startsWith('create class ')) {
+        let acc = text; this.cursor++;
+        while (this.cursor < this.lines.length && /(,|where)$/.test(acc.trim())) acc += ' ' + this.lines[this.cursor++].text;
+        units.push({ kind: 'class', text: acc, line });
+        continue;
+      }
+      if (text === 'create state' || text.startsWith('create state ')) {
+        let acc = text; this.cursor++;
+        while (this.cursor < this.lines.length && /(,|states)$/.test(acc.trim())) acc += ' ' + this.lines[this.cursor++].text;
+        units.push({ kind: 'state', text: acc, line });
+        continue;
+      }
+
       if (text === 'loop' || text.startsWith('loop ') || text.startsWith('loop(')) {
         const header = text; this.cursor++;
         const bodyUnits = this.readUnits(true);
@@ -580,6 +688,7 @@ class Interpreter {
   buildStatement(u, inAction) {
     if (u.kind === 'action') throw new LavaError(`Cannot declare an action here (line ${u.line})`);
     if (u.kind === 'pattern') throw new LavaError(`Cannot declare a pattern here (line ${u.line})`);
+    if (u.kind === 'class' || u.kind === 'state') throw new LavaError(`Cannot declare a ${u.kind} here (line ${u.line})`);
     if (u.kind === 'loop') {
       if (inAction) throw new LavaError(`Actions cannot loop (line ${u.line})`);
       const hdr = new Parser(lexLine(u.header, u.line), this.names).parseLoopHeader();
@@ -705,6 +814,7 @@ class Interpreter {
         if (src.value.type !== 'string') throw new LavaError(`pattern source '${node.source}' must be a string`);
         return { type: 'string', value: applyPattern(def, src.value.value) };
       }
+      case 'read': return { type: 'string', value: this.readField(node.cls, node.field) };
       case 'sqrt': return num(Math.sqrt(this.numeric(node.operand)));
       case 'binop': {
         const a = this.numeric(node.left), b = this.numeric(node.right);
@@ -734,7 +844,47 @@ class Interpreter {
         if (l.type !== r.type) throw new LavaError(`Type mismatch: cannot compare ${l.type} with ${r.type}`);
         return l.value === r.value;
       }
+      case 'isCase': {
+        const lv = this.evalExpr(node.left);
+        if (lv.type !== 'string') throw new LavaError(`'is <case>' needs a state or string on the left, got ${lv.type}`);
+        let validCases = null;
+        if (node.left.kind === 'read') validCases = this.states.get(node.left.cls + ' ' + node.left.field) || null;
+        return this.evalCase(node.cases, lv.value, validCases);
+      }
     }
+  }
+  evalCase(c, v, valid) {
+    switch (c.op) {
+      case 'or': return this.evalCase(c.left, v, valid) || this.evalCase(c.right, v, valid);
+      case 'and': return this.evalCase(c.left, v, valid) && this.evalCase(c.right, v, valid);
+      case 'not': return !this.evalCase(c.operand, v, valid);
+      case 'case':
+        if (valid && !valid.has(c.name)) throw new LavaError(`'${c.name}' is not a declared case of this state`);
+        return v === c.name;
+    }
+  }
+
+  // resolve a class path (~, absolute, or relative to the .lava file)
+  resolveClassPath(p) {
+    if (p.startsWith('~')) return join(homedir(), p.slice(1));
+    if (isAbsolute(p)) return p;
+    return join(this.baseDir, p);
+  }
+  // live read: re-read the file each time, apply the field's pattern
+  readField(clsName, field) {
+    const cls = this.classes.get(clsName);
+    if (!cls) throw new LavaError(`No class named '${clsName}'`);
+    const pat = cls.fields.get(field);
+    if (!pat) throw new LavaError(`class '${clsName}' has no field '${field}'`);
+    const def = this.patterns.get(pat);
+    let content;
+    try { content = readFileSync(this.resolveClassPath(cls.path), 'utf8'); }
+    catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
+    const value = applyPattern(def, content);
+    const cases = this.states.get(clsName + ' ' + field);
+    if (cases && !cases.has(value))
+      throw new LavaError(`data for '${field}' is '${value}', not a declared case of state '${field}'`);
+    return value;
   }
 }
 
@@ -744,7 +894,7 @@ function num(x) { return { type: Number.isInteger(x) ? 'int' : 'float', value: x
 const file = process.argv[2];
 if (!file) { console.error('usage: node lava.mjs <file.lava>'); process.exit(2); }
 try {
-  new Interpreter().run(readFileSync(file, 'utf8'));
+  new Interpreter(dirname(file)).run(readFileSync(file, 'utf8'));
 } catch (e) {
   if (e instanceof LavaError) { console.error('lava: ' + e.message); process.exit(1); }
   throw e;

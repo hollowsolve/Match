@@ -80,7 +80,21 @@ names onto match (e.g. `minus` → match's `hyphen`). match itself is unchanged.
   VM** (`../dist`). Extracting counts as a read, so an action using it must
   declare `reads <source>`.
 
-Not yet: classes, states, `wait`, filesystem I/O, `UserInput`.
+**Slice 5 — classes and states.**
+
+- `create class "<Name>" from "<path>" where "<Field>" is <Pattern>, …`
+  binds a file; each field is a pattern applied to that file's contents.
+  Paths resolve `~`, absolute, or relative to the `.lava` file.
+- `<Field> from <Class>` is a **live read** — the file is re-read every time.
+- `create state "<Field>" from class <Class> with states "<case>", …` declares
+  the closed set of valid cases for a class field (the state name *is* a field).
+- `<Field> from <Class> is <case>` checks the case with bare names and boolean
+  algebra: `is admin`, `is (owner or admin)`, `is not member` — never quoted.
+  An undeclared case name, or data outside the declared set, is an error.
+- Reading a class field charges the **class** against the capability footprint,
+  so an action must declare `reads <Class>` to read any of its fields.
+
+Not yet: `wait`, filesystem writes (`overwrite`), `Line`/`contents`, `UserInput`.
 
 ## Run
 
@@ -90,4 +104,5 @@ node lava/lava.mjs lava/examples/account.lava    # actions + footprints
 node lava/lava.mjs lava/examples/escalation.lava # footprint violation, rejected
 node lava/lava.mjs lava/examples/loops.lava      # loops + break
 node lava/lava.mjs lava/examples/pattern.lava    # patterns via match
+node lava/lava.mjs lava/examples/classes.lava    # classes + states (live file reads)
 ```

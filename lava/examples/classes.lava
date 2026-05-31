@@ -1,0 +1,41 @@
+~ Lava slice 5 — classes bind patterns to a file; states close the value set.
+~ Data file lava/examples/data/users.txt holds:  |alice_99|admin|
+
+~ field patterns (canonical names only, no quoted literals)
+create pattern "GetUsername" as
+  start after pipe,
+  stop before pipe,
+  one or more unreserved character
+end
+
+create pattern "GetRole" as
+  start at char 11,
+  stop before pipe,
+  one or more unreserved character
+end
+
+~ a class binds the file; each field is a pattern applied to it
+create class "Users" from "data/users.txt" where
+  "Username" is GetUsername,
+  "PermissionLevel" is GetRole
+
+~ a state closes the value set of a field
+create state "PermissionLevel" from class Users with states
+  "owner",
+  "admin",
+  "member"
+
+~ reads are live: re-read from disk every time
+print(Username from Users)
+print(PermissionLevel from Users)
+
+~ state case checks — bare case names, boolean algebra, no quotes
+if (PermissionLevel from Users is admin) then print("is admin")
+if (PermissionLevel from Users is (owner or admin)) then print("elevated")
+if (PermissionLevel from Users is member) then print("is member") else print("not member")
+
+~ an action may read the class only if it declares it
+create action "Greet" reads Users writes Console as
+  print(Username from Users)
+end
+Greet()
