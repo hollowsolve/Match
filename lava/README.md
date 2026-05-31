@@ -69,22 +69,50 @@ A numeric refinement is part of a container's identity, so the bad state cannot
 exist (and there's no separate rule to drift out of sync):
 
 ```
-create container "Credit" of type int at least 0 with value 100
-create container "Hold"   of type int never above Credit with value 0
+create container "Credit" of type int never less than 0 with value 100
+create container "Hold"   of type int never greater than Credit with value 0
 ```
 
-`at least N` · `at most N` · `between N and M` · `never above C` · `never below C`.
-Every write is checked; a violation undoes the write and fails.
+`never less than <N|C>` · `never greater than <N|C>`, joined with `and`; `N` is a
+literal, `C` another container. Every write is checked; a violation undoes the
+write and fails.
 
-### Guards and predicates
+### Guards, predicates, comparators
 
 ```
 if (PermissionLevel is "admin") then ShowDashboard()
 if ((Velocity is 30) and (not (Name is "anon"))) then go()
+if (Balance less than 0) then warn()
 ```
 
-Predicate algebra is just `is`, `and`, `or`, `not`, parens. Effects after `then`
-(and `else`) are comma-separated.
+Predicate algebra is `is`, `and`, `or`, `not`, parens. Comparators are **prose**,
+with equality anchored on `is` (there is no `=`, ever):
+
+`is` · `less than` · `greater than` · `less than or is` · `greater than or is`
+
+They read aloud as what they mean and work in any predicate — `if`, `wait until`,
+and state conditions alike. Effects after `then` (and `else`) are comma-separated.
+
+### States — a value *is* a state
+
+A container's states are **named conditions over itself** — the condition *is*
+the state, and every subject is named (no anonymous "value"):
+
+```
+create container "Balance" of type int from states (
+  overdrawn if Balance less than 0,
+  low if Balance greater than or is 0 and Balance less than or is 20,
+  healthy if Balance greater than 20
+) with value 50
+
+if (Balance is healthy) then go()      ~ "is healthy" evaluates healthy's condition
+```
+
+`Balance is overdrawn` doesn't compare a label — it evaluates `overdrawn`'s
+defining condition. Conditions may reference other containers, so relational
+states are the same construction (`safe if Exposure less than CreditLimit`).
+There is no separate `create state` for a container — its `from states (...)`
+block *is* its state space, partitioned by condition.
 
 ### Loops
 
@@ -253,6 +281,8 @@ node lava/lava.mjs lava/examples/sync.lava                # atomic transaction
 node lava/lava.mjs lava/examples/bounds.lava              # invariants on containers
 node lava/lava.mjs lava/examples/bounds-atomic.lava       # dip-through, commit consistent
 node lava/lava.mjs lava/examples/bounds-violation.lava    # a violation is rejected
+node lava/lava.mjs lava/examples/states.lava             # states as named conditions
+node lava/test.mjs                                       # run the whole suite
 ```
 
 Requirements: Node 18+, and match built at `../dist` (`npm run build:esm` from
@@ -286,9 +316,13 @@ Name()                                          ~ action / synchronous-block cal
 ~ comment
 ```
 
-**Bounds:** `at least N` · `at most N` · `between N and M` · `never above C` ·
-`never below C` (int containers).
+**Bounds:** `never less than <N|C>` · `never greater than <N|C>`, joined with
+`and` (int containers).
+**States:** `from states ( <name> if <predicate>, … )` on a container — each
+state is a named condition; `is <state>` evaluates it.
 **Predicates:** `is`, `and`, `or`, `not`, parens.
+**Comparators (prose):** `is` · `less than` · `greater than` · `less than or is` ·
+`greater than or is`.
 **Math:** `+ - * / ^ √`, n-th root; brackets required for >1 operation.
 
 ---
@@ -302,3 +336,16 @@ Name()                                          ~ action / synchronous-block cal
 
 ---
 
+## Lineage
+
+Lava is the third in a line, all chasing the same thing — erase the gap between
+the shape of a computation and the thing that runs:
+
+- **[match](../README.md)** — kill the translation layer for patterns. The name
+  *is* the character (`pipe`, not `\|`).
+- **statemap** — recover a formal, checkable map of how a system holds state,
+  from code that was never built to hold one. It must detect drift because the
+  map and the code are two artifacts.
+- **Lava** — make the code *be* the map, so there's nothing to drift. Statemap's
+  deepest idea (enforceable invariants) lives here as `bounds`, in the one place
+  it cannot lie: the declaration.
