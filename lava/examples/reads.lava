@@ -1,0 +1,18 @@
+~ Lava slice 12 — built-in class reads: contents, Line, Line N, and the EOF
+~ sentinel. Reads use `from`, like every other read.
+~ Data file lava/examples/data/doc.txt holds three lines.
+
+create pattern "Word" as
+  one or more unreserved character
+end
+
+create class "Doc" from "data/doc.txt" where
+  "First" is Word
+
+print(contents from Doc)        ~ the whole file
+print(Line from Doc)            ~ the first/current line
+print(Line 2 from Doc)          ~ a specific line
+
+~ EOF detects past-last-line; it compares structurally, never a type error
+if (Line 9 from Doc is EOF) then print("line 9 is past the end")
+if (Line 1 from Doc is EOF) then print("unexpected") else print("line 1 exists")

@@ -33,6 +33,8 @@ const cases = [
   ['states.lava', '', 0, 'healthy\nlow\noverdrawn\nnegative\nmaxed out'],
   ['userinput.lava', 'alice\nhi\nyo\n', 0, 'what is your name?\nalice\nsay something:\nhi\ntype a greeting:\nyo'],
   // expected-rejection cases: nonzero exit
+  ['reads.lava', '', 0, 'line one\nline two\nline three\nline one\nline two\nline 9 is past the end\nline 1 exists'],
+  // expected-rejection cases: nonzero exit
   ['escalation.lava', '', 1, null],
   ['bounds-violation.lava', '', 1, null],
 ];

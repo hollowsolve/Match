@@ -34,6 +34,7 @@ const KEYWORDS = new Set([
   'overwrite', 'contents', 'name', 'Line', 'of',
   'UserInput', 'wait', 'synchronous', 'actions',
   'never', 'less', 'greater', 'than',
+  'EOF',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
@@ -572,6 +573,18 @@ class Parser {
   parsePrimary() {
     const tok = this.peek();
     if (this.isWord('UserInput')) { this.next(); return { kind: 'userinput' }; }
+    if (this.isWord('EOF')) { this.next(); return { kind: 'eof' }; }
+    if (this.isWord('contents')) {
+      this.next(); this.expect('word', 'from'); const cls = this.parseName();
+      return { kind: 'readPart', part: 'contents', cls };
+    }
+    if (this.isWord('Line')) {
+      this.next();
+      let lineNo = null;
+      if (this.peek().type === 'number') lineNo = parseInt(this.next().value, 10);
+      this.expect('word', 'from'); const cls = this.parseName();
+      return { kind: 'readPart', part: 'line', lineNo, cls };
+    }
     if (this.isWord('extract')) return this.parseExtract();
     if (tok.type === 'op' && tok.value === '√') { this.next(); return { kind: 'sqrt', operand: this.parsePrimary() }; }
     if (tok.type === 'op' && tok.value === '-') { this.next(); const n = this.expect('number'); return { kind: 'lit', type: 'int', value: -parseInt(n.value, 10) }; }
@@ -599,8 +612,9 @@ class Parser {
     if (cmp === null)
       throw new LavaError(`Expected a comparator (is / less than / greater than) (line ${this.peek().line})`);
     if (cmp === 'is') {
-      // `is <literal>` is value equality; `is <bare names>` is a state check
+      // `is <literal>` / `is EOF` is value equality; `is <bare names>` is a state check
       const t = this.peek();
+      if (this.isWord('EOF')) { this.next(); return { kind: 'is', left, right: { kind: 'eof' } }; }
       if (t.type === 'string' || t.type === 'number' || (t.type === 'op' && t.value === '-') || t.type === '[')
         return { kind: 'is', left, right: this.parseExpr() };
       return { kind: 'isCase', left, cases: this.parseCaseExpr() };
@@ -680,6 +694,7 @@ function collectReadsWrites(stmts) {
     else if (n.kind === 'userinput') reads.add('UserInput');
     else if (n.kind === 'extract') reads.add(n.source);
     else if (n.kind === 'read') reads.add(n.cls); // reading a class field charges the class
+    else if (n.kind === 'readPart') reads.add(n.cls); // contents/Line from a class
     else if (n.kind === 'binop') { expr(n.left); expr(n.right); }
     else if (n.kind === 'sqrt') expr(n.operand);
   };
@@ -1163,6 +1178,8 @@ class Interpreter {
         return { type: 'string', value: applyPattern(def, src.value.value) };
       }
       case 'read': return { type: 'string', value: this.readField(node.cls, node.field) };
+      case 'readPart': return this.readPart(node.cls, node.part, node.lineNo);
+      case 'eof': return { type: 'eof', value: 'EOF' };
       case 'userinput': return { type: 'string', value: readLineSync() };
       case 'sqrt': return num(Math.sqrt(this.numeric(node.operand)));
       case 'binop': {
@@ -1190,6 +1207,9 @@ class Interpreter {
       case 'not': return !this.evalPred(node.operand);
       case 'is': {
         const l = this.evalExpr(node.left), r = this.evalExpr(node.right);
+        // EOF compares structurally: a line read either is EOF or it isn't —
+        // never a type error, so `Line n from C is EOF` is a clean test.
+        if (l.type === 'eof' || r.type === 'eof') return l.type === 'eof' && r.type === 'eof';
         if (l.type !== r.type) throw new LavaError(`Type mismatch: cannot compare ${l.type} with ${r.type}`);
         return l.value === r.value;
       }
@@ -1258,6 +1278,22 @@ class Interpreter {
     if (cases && !cases.has(value))
       throw new LavaError(`data for '${field}' is '${value}', not a declared case of state '${field}'`);
     return value;
+  }
+
+  // built-in class reads: whole `contents`, or a `Line [n]`. A `Line n` past the
+  // last line reads as the EOF sentinel (compare with `is EOF` to detect it).
+  readPart(clsName, part, lineNo) {
+    const cls = this.classes.get(clsName);
+    if (!cls) throw new LavaError(`No class named '${clsName}'`);
+    let content;
+    try { content = readFileSync(this.resolveClassPath(cls.path), 'utf8'); }
+    catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
+    if (part === 'contents') return { type: 'string', value: content };
+    const lines = content.split('\n');
+    const idx = lineNo === null ? 0 : lineNo - 1;
+    if (idx < 0) throw new LavaError(`'${clsName}' has no line ${lineNo}`);
+    if (idx >= lines.length) return { type: 'eof', value: 'EOF' };
+    return { type: 'string', value: lines[idx] };
   }
 }
 
