@@ -1,0 +1,41 @@
+~ Lava slice 9 — synchronous actions: an atomic group of action calls.
+~ The block composes real, sealed actions. They commit as one unit: no
+~ observer (or suspended wait) can see a state where one landed but another did not.
+
+create container "LoginStatus" of type string with value "anon"
+create container "PermissionLevel" of type string with value "guest"
+create container "Audit" of type string with value "-"
+
+~ a wait watching for the HALF state that must never exist: authenticated but
+~ still guest. With the transaction's wake deferred to the end, it never fires.
+wait until ((LoginStatus is "authenticated") and (PermissionLevel is "guest")) then print("BUG: observed a half-applied transaction")
+
+~ a wait for the fully-committed state — the only one that fires
+wait until ((LoginStatus is "authenticated") and (PermissionLevel is "member")) then print("login fully applied")
+
+~ each piece is a normal action, sealed with its own footprint, reusable alone
+create action "Authenticate" writes LoginStatus as
+  update LoginStatus to "authenticated"
+end
+
+create action "Promote" writes PermissionLevel as
+  update PermissionLevel to "member"
+end
+
+create action "RecordAudit" writes Audit as
+  update Audit to "user upgraded"
+end
+
+~ the synchronous block just composes the calls; its footprint is their union
+create synchronous actions "UpdateUser" as
+  Authenticate(),
+  Promote(),
+  RecordAudit()
+end
+
+print("before")
+UpdateUser()
+print("after")
+print(LoginStatus)
+print(PermissionLevel)
+print(Audit)

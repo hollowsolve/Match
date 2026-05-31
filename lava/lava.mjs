@@ -32,7 +32,7 @@ const KEYWORDS = new Set([
   'extract', 'from', 'start', 'stop', 'at', 'after', 'before', 'char',
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
-  'UserInput', 'wait',
+  'UserInput', 'wait', 'synchronous', 'actions',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
@@ -226,7 +226,7 @@ function lexLine(line, lineNo) {
       push('number', n, start + 1);
       continue;
     }
-    if ('()[],'.includes(ch)) { push(ch, ch, i + 1); i++; continue; }
+    if ('()[],:'.includes(ch)) { push(ch, ch, i + 1); i++; continue; }
     if (BINOPS.has(ch)) { push('op', ch, i + 1); i++; continue; }
     if (isLetter(ch)) {
       const start = i; let w = '';
@@ -408,6 +408,33 @@ class Parser {
     if (this.eatWord('writes')) writes = this.parseFootprintList();
     this.expect('word', 'as');
     return { name, reads, writes };
+  }
+
+  // create synchronous actions "Name" [reads ...] [writes ...] as
+  //   Label: (effect [, effect]),
+  //   Label: (effect)
+  // end
+  // The whole body commits atomically: all sub-effects' values are computed,
+  // then applied together, so no observer can see a partial state.
+  parseSyncHeader() {
+    this.expect('word', 'create'); this.expect('word', 'synchronous'); this.expect('word', 'actions');
+    const name = this.expect('string').value;
+    this.expect('word', 'as');
+    return { name };
+  }
+
+  // a synchronous body is comma-separated action calls: `ActionName(), Other()`.
+  // The block composes already-sealed actions; its footprint is their union.
+  parseSyncBody() {
+    const calls = [];
+    do {
+      const words = [];
+      while (this.peek().type === 'word') words.push(this.next().value);
+      if (words.length === 0) throw new LavaError(`Expected an action name (line ${this.peek().line})`);
+      this.expect('('); this.expect(')');
+      calls.push(words.join(' '));
+    } while (this.match(','));
+    return calls;
   }
 
   // extract <PatternName> from <source> — apply a pattern to a string source
@@ -598,6 +625,7 @@ class Interpreter {
     this.baseDir = baseDir;
     this.suspended = []; // { cond, effects, line } reactive waits awaiting a mutation
     this.waking = false; // reentrancy guard so updates inside wake() don't recurse
+    this.deferWake = 0;  // >0 inside a synchronous block: updates don't wake yet
   }
 
   run(source) {
@@ -667,9 +695,28 @@ class Interpreter {
       this.actions.set(hdr.name, { reads: new Set(hdr.reads), writes: new Set(hdr.writes), body });
     }
 
+    // phase 1e: hoist every synchronous block (an atomic group of action calls).
+    // Each call must name a real, non-sync action (hoisted in 1d). The block's
+    // footprint is the union of the actions it composes.
+    for (const u of units) {
+      if (u.kind !== 'sync') continue;
+      const hdr = new Parser(lexLine(u.header, u.line), this.names).parseSyncHeader();
+      const calls = new Parser(lexLine(u.body, u.line), this.names).parseSyncBody();
+      const reads = new Set(), writes = new Set();
+      for (const name of calls) {
+        const a = this.actions.get(name);
+        if (!a) throw new LavaError(`synchronous actions '${hdr.name}' calls unknown action '${name}' (line ${u.line})`);
+        if (a.sync) throw new LavaError(`synchronous actions '${hdr.name}' cannot nest another synchronous block '${name}' (line ${u.line})`);
+        a.reads.forEach(r => reads.add(r));
+        a.writes.forEach(w => writes.add(w));
+      }
+      if (this.actions.has(hdr.name)) throw new LavaError(`'${hdr.name}' already exists (line ${u.line})`);
+      this.actions.set(hdr.name, { reads, writes, sync: true, calls });
+    }
+
     // phase 2: run the orchestrator top to bottom
     for (const u of units) {
-      if (u.kind === 'action' || u.kind === 'pattern' || u.kind === 'class' || u.kind === 'state') continue;
+      if (u.kind === 'action' || u.kind === 'sync' || u.kind === 'pattern' || u.kind === 'class' || u.kind === 'state') continue;
       const node = this.buildStatement(u, /*inAction*/false);
       try { this.exec(node); }
       catch (e) { if (e instanceof BreakSignal) throw new LavaError(`'break' outside a loop (line ${u.line})`); throw e; }
@@ -687,6 +734,21 @@ class Interpreter {
       if (text === 'end') {
         if (stopAtEnd) { this.cursor++; return units; }
         throw new LavaError(`Unexpected 'end' (line ${line})`);
+      }
+
+      if (text === 'create synchronous actions' || text.startsWith('create synchronous actions ')) {
+        let header = text; this.cursor++;
+        while (!endsWithAs(header)) {
+          if (this.cursor >= this.lines.length) throw new LavaError(`Synchronous actions header missing 'as' (line ${line})`);
+          header += ' ' + this.lines[this.cursor].text; this.cursor++;
+        }
+        const bodyLines = [];
+        while (this.cursor < this.lines.length && this.lines[this.cursor].text !== 'end')
+          bodyLines.push(this.lines[this.cursor++].text);
+        if (this.cursor >= this.lines.length) throw new LavaError(`Synchronous actions missing 'end' (line ${line})`);
+        this.cursor++; // consume 'end'
+        units.push({ kind: 'sync', header, body: bodyLines.join(' '), line });
+        continue;
       }
 
       if (text === 'create action' || text.startsWith('create action ')) {
@@ -757,6 +819,7 @@ class Interpreter {
     if (u.kind === 'action') throw new LavaError(`Cannot declare an action here (line ${u.line})`);
     if (u.kind === 'pattern') throw new LavaError(`Cannot declare a pattern here (line ${u.line})`);
     if (u.kind === 'class' || u.kind === 'state') throw new LavaError(`Cannot declare a ${u.kind} here (line ${u.line})`);
+    if (u.kind === 'sync') throw new LavaError(`Cannot declare synchronous actions here (line ${u.line})`);
     if (u.kind === 'loop') {
       if (inAction) throw new LavaError(`Actions cannot loop (line ${u.line})`);
       const hdr = new Parser(lexLine(u.header, u.line), this.names).parseLoopHeader();
@@ -888,15 +951,36 @@ class Interpreter {
       const v = this.evalExpr(e.expr);
       this.checkType(e.name, cell.types, v);
       cell.value = v;
-      this.wake(); // a container mutation may release suspended waits
+      if (!this.deferWake) this.wake(); // a mutation may release suspended waits
       return;
     }
     if (e.op === 'overwrite') { this.overwrite(e.target, this.evalExpr(e.value)); return; }
     if (e.op === 'call') {
       const def = this.actions.get(e.name);
       if (!def) throw new LavaError(`No action named '${e.name}'`);
-      def.body.forEach(s => this.exec(s));
+      if (def.sync) this.runSync(def);
+      else def.body.forEach(s => this.exec(s));
     }
+  }
+
+  // Atomic execution of a synchronous block. The composed actions run in order
+  // (each sees prior steps' writes), but wake() is deferred to the very end, so
+  // no suspended wait can ever observe a half-applied transaction. On any
+  // failure, container state is rolled back from a pre-transaction snapshot.
+  // (Mid-transaction file overwrites are committed in order and not rolled back.)
+  runSync(def) {
+    const snapshot = new Map();
+    for (const [k, cell] of this.env) snapshot.set(k, cell.value);
+    this.deferWake++;
+    try {
+      for (const name of def.calls) this.actions.get(name).body.forEach(s => this.exec(s));
+    } catch (e) {
+      for (const [k, v] of snapshot) { const c = this.env.get(k); if (c) c.value = v; }
+      this.deferWake--;
+      throw e;
+    }
+    this.deferWake--;
+    this.wake(); // single wake after the whole transaction lands
   }
 
   // filesystem write: contents replaces the file; name renames it; Line [n]

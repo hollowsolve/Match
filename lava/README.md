@@ -91,8 +91,7 @@ names onto match (e.g. `minus` → match's `hyphen`). match itself is unchanged.
 - `<Field> from <Class> is <case>` checks the case with bare names and boolean
   algebra: `is admin`, `is (owner or admin)`, `is not member` — never quoted.
   An undeclared case name, or data outside the declared set, is an error.
-- Reading a class field charges the **class** against the capability footprint,
-  so an action must declare `reads <Class>` to read any of its fields.
+- reading a class field charges the **class** against the capability footprint.
 
 **Slice 6 — filesystem writes.**
 
@@ -102,18 +101,15 @@ names onto match (e.g. `minus` → match's `hyphen`). match itself is unchanged.
   - `Line of <Class>` / `Line <n> of <Class>` — replace one line (bare `Line`
     is the first line); an out-of-range line is an error
 - reads are live, so a write is visible on the very next read
-- overwriting charges `writes <Class>` against the capability footprint, so an
-  action must declare `writes <Class>` to overwrite any part of it
-
-Read/write asymmetry holds: reads use `from`, writes name the target with `of`.
+- overwriting charges `writes <Class>` against the capability footprint
+- read/write asymmetry: reads use `from`, writes name the target with `of`
 
 **Slice 7 — UserInput.**
 
 - `UserInput` is a read-only origin that yields one line of stdin (accepts with
   newline). Use it anywhere a string value is expected: `update Name to UserInput`.
 - Origins are **direction-typed**: `UserInput` is read-only, `Console` is
-  write-only. An action that uses `UserInput` must declare `reads UserInput`;
-  declaring `writes UserInput` or `reads Console` is rejected at load time.
+  write-only. Declaring `writes UserInput` or `reads Console` is rejected at load.
 
 **Slice 8 — reactive wait.**
 
@@ -121,14 +117,25 @@ Read/write asymmetry holds: reads use `from`, writes name the target with `of`.
   is already true it fires now; otherwise it *suspends* and execution continues.
 - A container `update` is a wake event: every suspended wait whose predicate is
   now true fires, in **source order** (top of file first). A fired wait's effects
-  may mutate further, waking more waits — cascades resolve in source order until
-  nothing new fires.
+  may mutate further, waking more waits — cascades resolve in source order.
 - A wait that never becomes true simply never fires; the program ends normally.
 - `wait` is top-level only (forbidden inside actions, like `loop`).
-- The timed form `wait (<duration>) until …` and waits driven by `UserInput`
-  are not yet implemented (they error clearly rather than misbehave).
+- The timed form `wait (<duration>) until …` errors clearly (not yet implemented).
 
-Not yet: synchronous actions; timed/UserInput-driven waits.
+**Slice 9 — synchronous actions.**
+
+- `create synchronous actions "<Name>" as <Call>(), <Call>(), … end` composes
+  already-defined actions into one **atomic** unit. It is orchestration, not an
+  action, so "actions cannot call actions" still holds — the block does the calling.
+- the block's footprint is the **union** of the actions it calls (derived).
+- atomicity: the composed actions run in order (each sees prior writes), but the
+  reactive `wake()` is **deferred to the end** — so no suspended `wait` can ever
+  observe a half-applied transaction. On any failure, container state is **rolled
+  back** from a pre-transaction snapshot. (Mid-transaction file overwrites are not
+  rolled back — an OS-level limit.)
+- a synchronous block may not nest another; calling an unknown action is rejected.
+
+Not yet: timed / `UserInput`-driven waits.
 
 ## Run
 
@@ -142,4 +149,5 @@ node lava/lava.mjs lava/examples/classes.lava    # classes + states (live file r
 node lava/lava.mjs lava/examples/writes.lava     # overwrite + live read roundtrip
 printf 'alice\nhi\nyo\n' | node lava/lava.mjs lava/examples/userinput.lava  # UserInput
 node lava/lava.mjs lava/examples/wait.lava       # reactive wait: suspend, wake, cascade
+node lava/lava.mjs lava/examples/sync.lava       # synchronous actions: atomic transaction
 ```
