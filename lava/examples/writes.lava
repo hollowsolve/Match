@@ -1,0 +1,26 @@
+~ Lava slice 6 — filesystem writes via overwrite(<part> of <Class>, <value>).
+~ Reads are live, so a write is immediately visible on the next read.
+~ Operates on a scratch file (gitignored) created by the first overwrite.
+
+create pattern "FirstField" as
+  start after pipe,
+  stop before pipe,
+  one or more unreserved character
+end
+
+create class "Scratch" from "data/scratch.txt" where
+  "Field" is FirstField
+
+~ overwrite contents creates/replaces the whole file
+overwrite(contents of Scratch, "|alpha|x|")
+print(Field from Scratch)        ~ alpha — read straight back from disk
+
+overwrite(contents of Scratch, "|bravo|y|")
+print(Field from Scratch)        ~ bravo — live read reflects the new write
+
+~ an action may write the class only if it declares it
+create action "SetCharlie" writes Scratch as
+  overwrite(contents of Scratch, "|charlie|z|")
+end
+SetCharlie()
+print(Field from Scratch)        ~ charlie

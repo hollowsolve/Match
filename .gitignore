@@ -10,3 +10,4 @@ native/libmatch/target/
 __pycache__/
 *.pyc
 .DS_Store
+lava/examples/data/scratch*.txt

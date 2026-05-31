@@ -15,7 +15,7 @@
 //
 // Not yet: patterns, classes, states, loops, wait, filesystem, UserInput, match.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, dirname } from 'node:path';
 
@@ -31,6 +31,7 @@ const KEYWORDS = new Set([
   'loop', 'until', 'times', 'break',
   'extract', 'from', 'start', 'stop', 'at', 'after', 'before', 'char',
   'class', 'where', 'state', 'states',
+  'overwrite', 'contents', 'name', 'Line', 'of',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 const BUILTIN_ORIGINS = new Set(['Console']);
@@ -317,6 +318,14 @@ class Parser {
       this.next(); const name = this.parseName(); this.expect('word', 'to'); const expr = this.parseExpr();
       return { op: 'update', name, expr };
     }
+    if (this.isWord('overwrite')) {
+      this.next(); this.expect('(');
+      const target = this.parseTarget();
+      this.expect(','); // overwrite(target, value)
+      const value = this.parseExpr();
+      this.expect(')');
+      return { op: 'overwrite', target, value };
+    }
     if (tok.type === 'word' && !KEYWORDS.has(tok.value)) return this.parseCall(); // action call
     throw new LavaError(`Expected an effect (print / update / action call), got '${tok.value || tok.type}' (line ${tok.line})`);
   }
@@ -373,6 +382,23 @@ class Parser {
     this.expect('word', 'from');
     const source = this.parseName();
     return { kind: 'extract', pattern: words.join(' '), source };
+  }
+
+  // write target: <part> of <Class>, where part is contents | name | Line [n]
+  parseTarget() {
+    const w = this.expect('word');
+    let part, lineNo = null;
+    if (w.value === 'contents') part = 'contents';
+    else if (w.value === 'name') part = 'name';
+    else if (w.value === 'Line') {
+      part = 'line';
+      if (this.peek().type === 'number') lineNo = parseInt(this.next().value, 10);
+    } else {
+      throw new LavaError(`Expected a write target (contents / name / Line) (line ${w.line})`);
+    }
+    this.expect('word', 'of');
+    const cls = this.parseName();
+    return { part, lineNo, cls };
   }
 
   // pattern body clauses: optional `start <at|after> M`, optional `stop <at|before> M`,
@@ -513,6 +539,7 @@ function collectReadsWrites(stmts) {
   const eff = (e) => {
     if (e.op === 'update') { writes.add(e.name); expr(e.expr); }
     else if (e.op === 'print') { writes.add('Console'); expr(e.expr); }
+    else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value); }
     // 'break' / 'call' touch no state and never appear in an action body
   };
   const stmt = (s) => {
@@ -786,11 +813,42 @@ class Interpreter {
       cell.value = v;
       return;
     }
+    if (e.op === 'overwrite') { this.overwrite(e.target, this.evalExpr(e.value)); return; }
     if (e.op === 'call') {
       const def = this.actions.get(e.name);
       if (!def) throw new LavaError(`No action named '${e.name}'`);
       def.body.forEach(s => this.exec(s));
     }
+  }
+
+  // filesystem write: contents replaces the file; name renames it; Line [n]
+  // replaces a single line (bare Line is the first/current line).
+  overwrite(target, value) {
+    const cls = this.classes.get(target.cls);
+    if (!cls) throw new LavaError(`No class named '${target.cls}'`);
+    if (value.type !== 'string') throw new LavaError(`overwrite value must be a string, got ${value.type}`);
+    const path = this.resolveClassPath(cls.path);
+
+    if (target.part === 'contents') { writeFileSync(path, value.value); return; }
+
+    if (target.part === 'name') {
+      const dest = this.resolveClassPath(value.value);
+      try { renameSync(path, dest); }
+      catch { throw new LavaError(`class '${target.cls}' cannot be renamed to '${value.value}'`); }
+      cls.path = value.value; // the class now tracks its new location
+      return;
+    }
+
+    // line write
+    let content;
+    try { content = readFileSync(path, 'utf8'); }
+    catch { throw new LavaError(`class '${target.cls}' cannot read its data at '${cls.path}'`); }
+    const lines = content.split('\n');
+    const idx = target.lineNo === null ? 0 : target.lineNo - 1;
+    if (idx < 0 || idx >= lines.length)
+      throw new LavaError(`class '${target.cls}' has no line ${target.lineNo} to overwrite`);
+    lines[idx] = value.value;
+    writeFileSync(path, lines.join('\n'));
   }
 
   checkType(name, types, v) {

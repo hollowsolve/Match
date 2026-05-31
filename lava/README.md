@@ -94,7 +94,20 @@ names onto match (e.g. `minus` → match's `hyphen`). match itself is unchanged.
 - Reading a class field charges the **class** against the capability footprint,
   so an action must declare `reads <Class>` to read any of its fields.
 
-Not yet: `wait`, filesystem writes (`overwrite`), `Line`/`contents`, `UserInput`.
+**Slice 6 — filesystem writes.**
+
+- `overwrite(<part> of <Class>, <value>)` writes to the class's file:
+  - `contents of <Class>` — replace the whole file (creates it if absent)
+  - `name of <Class>` — rename/move the file; the class tracks its new path
+  - `Line of <Class>` / `Line <n> of <Class>` — replace one line (bare `Line`
+    is the first line); an out-of-range line is an error
+- reads are live, so a write is visible on the very next read
+- overwriting charges `writes <Class>` against the capability footprint, so an
+  action must declare `writes <Class>` to overwrite any part of it
+
+Read/write asymmetry holds: reads use `from`, writes name the target with `of`.
+
+Not yet: `wait`, `UserInput`, synchronous actions.
 
 ## Run
 
@@ -105,4 +118,5 @@ node lava/lava.mjs lava/examples/escalation.lava # footprint violation, rejected
 node lava/lava.mjs lava/examples/loops.lava      # loops + break
 node lava/lava.mjs lava/examples/pattern.lava    # patterns via match
 node lava/lava.mjs lava/examples/classes.lava    # classes + states (live file reads)
+node lava/lava.mjs lava/examples/writes.lava     # overwrite + live read roundtrip
 ```
