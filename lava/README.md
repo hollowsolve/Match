@@ -115,7 +115,20 @@ Read/write asymmetry holds: reads use `from`, writes name the target with `of`.
   write-only. An action that uses `UserInput` must declare `reads UserInput`;
   declaring `writes UserInput` or `reads Console` is rejected at load time.
 
-Not yet: `wait`, synchronous actions.
+**Slice 8 — reactive wait.**
+
+- `wait until (<predicate>) then <effects>` is **non-blocking**: if the predicate
+  is already true it fires now; otherwise it *suspends* and execution continues.
+- A container `update` is a wake event: every suspended wait whose predicate is
+  now true fires, in **source order** (top of file first). A fired wait's effects
+  may mutate further, waking more waits — cascades resolve in source order until
+  nothing new fires.
+- A wait that never becomes true simply never fires; the program ends normally.
+- `wait` is top-level only (forbidden inside actions, like `loop`).
+- The timed form `wait (<duration>) until …` and waits driven by `UserInput`
+  are not yet implemented (they error clearly rather than misbehave).
+
+Not yet: synchronous actions; timed/UserInput-driven waits.
 
 ## Run
 
@@ -128,4 +141,5 @@ node lava/lava.mjs lava/examples/pattern.lava    # patterns via match
 node lava/lava.mjs lava/examples/classes.lava    # classes + states (live file reads)
 node lava/lava.mjs lava/examples/writes.lava     # overwrite + live read roundtrip
 printf 'alice\nhi\nyo\n' | node lava/lava.mjs lava/examples/userinput.lava  # UserInput
+node lava/lava.mjs lava/examples/wait.lava       # reactive wait: suspend, wake, cascade
 ```

@@ -32,7 +32,7 @@ const KEYWORDS = new Set([
   'extract', 'from', 'start', 'stop', 'at', 'after', 'before', 'char',
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
-  'UserInput',
+  'UserInput', 'wait',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
@@ -275,9 +275,24 @@ class Parser {
         return this.parseCreate();
       case 'update': return { kind: 'effects', effects: this.parseEffectList() };
       case 'if': return this.parseIf();
+      case 'wait': return this.parseWait();
       case 'print': case 'Print': return { kind: 'effects', effects: this.parseEffectList() };
       default: return { kind: 'effects', effects: this.parseEffectList() }; // a call, possibly comma-chained
     }
+  }
+
+  // wait until (cond) then <effects>   — reactive suspend, wakes on mutation.
+  // wait (duration) until ...          — bounded/timed form (not yet supported).
+  parseWait() {
+    const t = this.expect('word', 'wait');
+    if (this.inAction) throw new LavaError(`'wait' cannot appear inside an action (line ${t.line})`);
+    if (this.peek().type === '(')
+      throw new LavaError(`Timed 'wait (<duration>) until ...' is not yet supported (line ${t.line})`);
+    this.expect('word', 'until');
+    this.expect('('); const cond = this.parsePred(); this.expect(')');
+    this.expect('word', 'then');
+    const effects = this.parseEffectList();
+    return { kind: 'wait', cond, effects, line: t.line };
   }
 
   parseCreate() {
@@ -581,6 +596,8 @@ class Interpreter {
     this.classes = new Map(); this.states = new Map();
     this.names = new Set(); this.constants = new Set();
     this.baseDir = baseDir;
+    this.suspended = []; // { cond, effects, line } reactive waits awaiting a mutation
+    this.waking = false; // reentrancy guard so updates inside wake() don't recurse
   }
 
   run(source) {
@@ -794,6 +811,39 @@ class Interpreter {
         return;
       }
       case 'loop': return this.runLoop(stmt);
+      case 'wait': {
+        // Evaluate now; if already true, fire immediately. Else suspend until a
+        // mutation makes it true (woken in source order by wake()).
+        if (this.evalPred(stmt.cond)) stmt.effects.forEach(e => this.effect(e));
+        else this.suspended.push(stmt);
+        return;
+      }
+    }
+  }
+
+  // A container mutation may make suspended waits true. Fire eligible waits in
+  // source order; a fired wait's effects may mutate further (cascade), so we
+  // rescan until a full pass fires nothing. Each fire removes one wait, so this
+  // terminates. Reentrant updates set `waking`, deferring to this loop.
+  wake() {
+    if (this.waking) return;
+    this.waking = true;
+    try {
+      let fired = true;
+      while (fired) {
+        fired = false;
+        this.suspended.sort((a, b) => a.line - b.line);
+        for (let i = 0; i < this.suspended.length; i++) {
+          if (this.evalPred(this.suspended[i].cond)) {
+            const w = this.suspended.splice(i, 1)[0];
+            w.effects.forEach(e => this.effect(e));
+            fired = true;
+            break; // rescan from the top to preserve source order after cascades
+          }
+        }
+      }
+    } finally {
+      this.waking = false;
     }
   }
 
@@ -838,6 +888,7 @@ class Interpreter {
       const v = this.evalExpr(e.expr);
       this.checkType(e.name, cell.types, v);
       cell.value = v;
+      this.wake(); // a container mutation may release suspended waits
       return;
     }
     if (e.op === 'overwrite') { this.overwrite(e.target, this.evalExpr(e.value)); return; }

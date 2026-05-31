@@ -1,0 +1,22 @@
+~ Lava slice 8 — reactive wait: suspend on a false predicate, wake on mutation.
+~ Waits are NOT blocking. They register, execution continues, and a later
+~ container mutation wakes every now-true wait in source order (cascading).
+
+create container "Ready" of type string with value "no"
+create container "Stage" of type string with value "start"
+create container "Log" of type string with value "-"
+
+~ two waits on the same condition — both suspend (Ready is "no")
+wait until (Ready is "yes") then update Log to "A", print("wait A woke")
+wait until (Ready is "yes") then print("wait B woke")
+
+~ a cascade: this wait only becomes true after wait A sets Log to "A"
+wait until (Log is "A") then print("cascade: Log is A")
+
+print("before the mutation")
+
+~ the single mutation that releases everything, in source order
+update Ready to "yes"
+
+print("after the mutation")
+print(Log)
