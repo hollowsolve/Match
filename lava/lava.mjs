@@ -139,6 +139,8 @@ function makeMarker(anchor, rest, lineNo) {
     if (!Number.isInteger(n) || n < 1) throw new LavaError(`'char' needs a positive position (line ${lineNo})`);
     return { anchor, marker: { type: 'char', position: n } };
   }
+  if (rest === 'SOL') return { anchor, marker: { type: 'sentinel', name: 'SOL' } };
+  if (rest === 'EOL') return { anchor, marker: { type: 'sentinel', name: 'EOL' } };
   if (/["']/.test(rest)) throw new LavaError(`Quoted literals are not allowed as markers — use a character name (line ${lineNo})`);
   return { anchor, marker: { type: 'name', name: rest } };
 }
@@ -167,6 +169,7 @@ function applyPatternSpan(def, text) {
   if (def.start) {
     const { anchor, marker } = def.start;
     if (marker.type === 'char') begin = anchor === 'at' ? marker.position - 1 : marker.position;
+    else if (marker.type === 'sentinel') begin = marker.name === 'SOL' ? 0 : text.length; // SOL/EOL
     else {
       const ch = markerChar(marker, def.line);
       const idx = text.indexOf(ch);
@@ -178,6 +181,7 @@ function applyPatternSpan(def, text) {
   if (def.stop) {
     const { anchor, marker } = def.stop;
     if (marker.type === 'char') regionEnd = anchor === 'at' ? marker.position : marker.position - 1;
+    else if (marker.type === 'sentinel') regionEnd = marker.name === 'SOL' ? 0 : text.length; // SOL/EOL
     else {
       const ch = markerChar(marker, def.line);
       const idx = text.indexOf(ch, begin);

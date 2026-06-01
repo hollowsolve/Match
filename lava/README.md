@@ -163,7 +163,8 @@ end
 The dialect: **proper full names only, no quoted literals anywhere** (`pipe` not
 `"|"`, `minus` not `"-"`), no abbreviations (`unreserved character`, not
 `pchar`), one canonical name per byte. Compiles to a match grammar and runs on
-the match VM. Markers are character names or `char <n>`.
+the match VM. Markers are character names, `char <n>`, or the line sentinels
+`SOL` / `EOL`.
 
 ### Classes & states — files as live state
 
@@ -192,6 +193,23 @@ overwrite(name of Users, "data/archive.txt")
 ```
 
 Read/write asymmetry: reads use `from`, writes name the target with `of`.
+
+Built-in class reads mirror the write targets — `contents from <Class>`,
+`Line from <Class>`, `Line <n> from <Class>`. A `Line <n>` past the last line
+reads as the `EOF` sentinel, which compares structurally (never a type error):
+
+```
+if (Line 9 from Doc is EOF) then atEnd()
+```
+
+A class field is read/write symmetric: `X from C` reads the span the field's
+pattern matches; `update X from C to v` splices `v` back into that exact span,
+leaving surrounding data intact. A field constrained by a `state` rejects a
+write outside its declared cases.
+
+```
+update Username from Account to "bob"     ~ splices the field in place
+```
 
 ### UserInput
 
@@ -282,6 +300,8 @@ node lava/lava.mjs lava/examples/bounds.lava              # invariants on contai
 node lava/lava.mjs lava/examples/bounds-atomic.lava       # dip-through, commit consistent
 node lava/lava.mjs lava/examples/bounds-violation.lava    # a violation is rejected
 node lava/lava.mjs lava/examples/states.lava             # states as named conditions
+node lava/lava.mjs lava/examples/reads.lava              # contents / Line / EOF reads
+node lava/lava.mjs lava/examples/fields.lava             # read/write-symmetric fields
 node lava/test.mjs                                       # run the whole suite
 ```
 
@@ -302,9 +322,12 @@ create state "<name>" from class <class> with states "<case>", …
 create synchronous actions "<name>" as <Call>(), … end
 
 update <name> to <expr>                         ~ container / state write
+update <field> from <class> to <value>          ~ splice a field in place
 overwrite(<contents|name|Line [n]> of <class>, <value>)
 print(<expr>)                                   ~ write to Console
 <field> from <class>                            ~ live read
+contents from <class> | Line [n] from <class>   ~ built-in class reads
+EOF                                             ~ past-last-line sentinel
 extract <pattern> from <source>                 ~ pattern over a string
 UserInput                                       ~ read-only origin (one line of stdin)
 
