@@ -159,8 +159,10 @@ function splitTopLevel(text, sep) {
 const PAT_ENC = new TextEncoder();
 const PAT_DEC = new TextDecoder();
 
-// Anchor the line position in JS, shape the capture with the match VM.
-function applyPattern(def, text) {
+// Anchor the line position in JS, shape the capture with the match VM. Returns
+// the matched value AND its char span [begin, end) — the span lets a write
+// splice the field back into place. `applyPattern` keeps the value-only shape.
+function applyPatternSpan(def, text) {
   let begin = 0;
   if (def.start) {
     const { anchor, marker } = def.start;
@@ -188,8 +190,10 @@ function applyPattern(def, text) {
   const bytes = PAT_ENC.encode(text.slice(begin, regionEnd));
   const consumed = fastMatch(def.cp, bytes);
   if (consumed <= 0) throw new LavaError(`pattern shape did not match the source`);
-  return PAT_DEC.decode(bytes.slice(0, consumed));
+  const value = PAT_DEC.decode(bytes.slice(0, consumed));
+  return { value, begin, end: begin + value.length };
 }
+function applyPattern(def, text) { return applyPatternSpan(def, text).value; }
 
 // ---------- comment stripping (quote-aware) ----------
 function stripComment(line) {
@@ -415,7 +419,12 @@ class Parser {
       return { op: 'print', expr };
     }
     if (this.isWord('update')) {
-      this.next(); const name = this.parseName(); this.expect('word', 'to'); const expr = this.parseExpr();
+      this.next(); const name = this.parseName();
+      if (this.isWord('from')) { // class-field write: update <field> from <Class> to <value>
+        this.next(); const cls = this.parseName(); this.expect('word', 'to'); const expr = this.parseExpr();
+        return { op: 'updateField', field: name, cls, expr };
+      }
+      this.expect('word', 'to'); const expr = this.parseExpr();
       return { op: 'update', name, expr };
     }
     if (this.isWord('overwrite')) {
@@ -706,6 +715,7 @@ function collectReadsWrites(stmts) {
   };
   const eff = (e) => {
     if (e.op === 'update') { writes.add(e.name); expr(e.expr); }
+    else if (e.op === 'updateField') { writes.add(e.cls); expr(e.expr); }
     else if (e.op === 'print') { writes.add('Console'); expr(e.expr); }
     else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value); }
     // 'break' / 'call' touch no state and never appear in an action body
@@ -785,7 +795,7 @@ class Interpreter {
       const cls = this.classes.get(d.cls);
       if (!cls) throw new LavaError(`state '${d.name}' names unknown class '${d.cls}' (line ${u.line})`);
       if (!cls.fields.has(d.name)) throw new LavaError(`state '${d.name}' has no matching field on class '${d.cls}' (line ${u.line})`);
-      this.states.set(d.cls + ' ' + d.name, new Set(d.cases));
+      this.states.set(d.cls + ' ' + d.name, new Set(d.cases));
     }
 
     // phase 1d: hoist + validate every action
@@ -1071,6 +1081,7 @@ class Interpreter {
       return;
     }
     if (e.op === 'overwrite') { this.overwrite(e.target, this.evalExpr(e.value)); return; }
+    if (e.op === 'updateField') { this.updateField(e.cls, e.field, this.evalExpr(e.expr)); return; }
     if (e.op === 'call') {
       const def = this.actions.get(e.name);
       if (!def) throw new LavaError(`No action named '${e.name}'`);
@@ -1228,7 +1239,7 @@ class Interpreter {
         const lv = this.evalExpr(node.left);
         if (lv.type !== 'string') throw new LavaError(`'is <case>' needs a state or string on the left, got ${lv.type}`);
         let validCases = null;
-        if (node.left.kind === 'read') validCases = this.states.get(node.left.cls + ' ' + node.left.field) || null;
+        if (node.left.kind === 'read') validCases = this.states.get(node.left.cls + ' ' + node.left.field) || null;
         return this.evalCase(node.cases, lv.value, validCases);
       }
     }
@@ -1274,7 +1285,7 @@ class Interpreter {
     try { content = readFileSync(this.resolveClassPath(cls.path), 'utf8'); }
     catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
     const value = applyPattern(def, content);
-    const cases = this.states.get(clsName + ' ' + field);
+    const cases = this.states.get(clsName + ' ' + field);
     if (cases && !cases.has(value))
       throw new LavaError(`data for '${field}' is '${value}', not a declared case of state '${field}'`);
     return value;
@@ -1294,6 +1305,27 @@ class Interpreter {
     if (idx < 0) throw new LavaError(`'${clsName}' has no line ${lineNo}`);
     if (idx >= lines.length) return { type: 'eof', value: 'EOF' };
     return { type: 'string', value: lines[idx] };
+  }
+
+  // class-field write: splice the new value into the exact span the field's
+  // pattern matches, then write the file back — keeping fields read/write
+  // symmetric (`X from C` reads the span, `update X from C to v` rewrites it).
+  updateField(clsName, field, v) {
+    const cls = this.classes.get(clsName);
+    if (!cls) throw new LavaError(`No class named '${clsName}'`);
+    const pat = cls.fields.get(field);
+    if (!pat) throw new LavaError(`class '${clsName}' has no field '${field}'`);
+    if (v.type !== 'string') throw new LavaError(`field '${field}' write value must be a string, got ${v.type}`);
+    const cases = this.states.get(clsName + ' ' + field);
+    if (cases && !cases.has(v.value))
+      throw new LavaError(`'${v.value}' is not a declared case of state '${field}'`);
+    const def = this.patterns.get(pat);
+    const path = this.resolveClassPath(cls.path);
+    let content;
+    try { content = readFileSync(path, 'utf8'); }
+    catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
+    const span = applyPatternSpan(def, content);
+    writeFileSync(path, content.slice(0, span.begin) + v.value + content.slice(span.end));
   }
 }
 

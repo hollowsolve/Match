@@ -1,0 +1,20 @@
+~ Lava slice 12 — class fields are read/write symmetric.
+~ `X from C` reads the span a field's pattern matches; `update X from C to v`
+~ splices v back into that exact span. Uses a gitignored scratch file.
+
+create pattern "Name" as
+  start after pipe,
+  stop before pipe,
+  one or more unreserved character
+end
+
+create class "Account" from "data/scratch.txt" where
+  "Username" is Name
+
+~ seed the file, then read/write the field in place
+overwrite(contents of Account, "|alice|admin|")
+print(Username from Account)             ~ alice
+
+update Username from Account to "bob"     ~ splice the field
+print(Username from Account)             ~ bob
+print(contents from Account)             ~ |bob|admin| — surrounding data intact
