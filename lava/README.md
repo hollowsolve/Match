@@ -224,7 +224,45 @@ update Name to UserInput        ~ one line of stdin, accepts with newline
 ```
 
 Origins are direction-typed: `UserInput` is read-only, `Console` (where `print`
-goes) is write-only. Declaring them backwards is rejected.
+goes) and `Screen` (where pixels go) are write-only. Declaring them backwards is
+rejected.
+
+### Screen — render pixels
+
+```
+create screen of size 16 by 16
+
+fill screen with rgb 20, 20, 28
+set pixel 3, 4 to red
+set pixel X, Y to rgb [X * 17], [Y * 17], 128
+show
+```
+
+`Screen` is an origin like `Console`, so **drawing is a write** — an action that
+draws declares `writes Screen`, and "which actions can draw?" stays a header grep:
+
+```
+create action "DrawBorderPixel" reads I writes Screen as
+  set pixel I, 0 to white
+end
+```
+
+Coordinates and colour channels are **expressions**, so a pixel's colour is
+computed from container state. Colours are `rgb <r>, <g>, <b>` (0–255 each) or a
+name: black, white, gray, red, green, lime, blue, yellow, cyan, magenta, orange,
+purple, brown, pink. Names are resolved by the colour parser rather than reserved,
+so a container may still be called `Red`.
+
+A screen starts black, is at most 512 in each dimension, and one program declares
+at most one. Drawing outside it **fails** rather than silently dropping the write —
+a program that draws off-screen is wrong about its own map. `show` presents the
+current frame; a program that drew but never called it still flushes one frame at
+exit, and a failed run flushes what it had (the last frame is usually the evidence
+for why it failed). An animation calls `show` once per frame.
+
+Each frame leaves the interpreter as one line on stdout — `[[lava:frame <w> <h>
+<base64 raw RGB>]]` — so it rides the same pipe as `print`. The Lava IDE lifts
+those lines out and draws them to a canvas; in a terminal you'll see the marker.
 
 ### Reactive wait — suspend, wake on mutation
 
@@ -306,6 +344,8 @@ node lava/lava.mjs lava/examples/bounds.lava              # invariants on contai
 node lava/lava.mjs lava/examples/bounds-atomic.lava       # dip-through, commit consistent
 node lava/lava.mjs lava/examples/bounds-violation.lava    # a violation is rejected
 node lava/lava.mjs lava/examples/bounds-between.lava      # every bound form, strict vs inclusive
+node lava/lava.mjs lava/examples/screen.lava             # pixels: gradient + border
+node lava/lava.mjs lava/examples/screen-footprint.lava   # drawing obeys footprints
 node lava/lava.mjs lava/examples/states.lava             # states as named conditions
 node lava/lava.mjs lava/examples/reads.lava              # contents / Line / EOF reads
 node lava/lava.mjs lava/examples/fields.lava             # read/write-symmetric fields
@@ -327,16 +367,21 @@ create pattern "<name>" as <clauses> end
 create class "<name>" from "<path>" where "<field>" is <pattern>, …
 create state "<name>" from class <class> with states "<case>", …
 create synchronous actions "<name>" as <Call>(), … end
+create screen of size <W> by <H>
 
 update <name> to <expr>                         ~ container / state write
 update <field> from <class> to <value>          ~ splice a field in place
 overwrite(<contents|name|Line [n]> of <class>, <value>)
 print(<expr>)                                   ~ write to Console
+set pixel <expr>, <expr> to <colour>            ~ write to Screen
+fill screen with <colour>                       ~ write to Screen
+show                                            ~ present the frame
 <field> from <class>                            ~ live read
 contents from <class> | Line [n] from <class>   ~ built-in class reads
 EOF                                             ~ past-last-line sentinel
 extract <pattern> from <source>                 ~ pattern over a string
 UserInput                                       ~ read-only origin (one line of stdin)
+rgb <r>, <g>, <b> | <colour name>               ~ a colour (channels are expressions)
 
 if (<pred>) then <effects> [else <effects>]
 loop / loop until (<pred>) / loop n times … end / break

@@ -1,0 +1,7 @@
+~ A screen small enough that its whole frame fits in a test expectation, so the
+~ wire format itself is pinned: [[lava:frame <w> <h> <base64 raw RGB>]]
+~ 2 by 1 = 6 bytes = red then blue.
+create screen of size 2 by 1
+set pixel 0, 0 to red
+set pixel 1, 0 to blue
+show

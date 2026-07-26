@@ -1,0 +1,39 @@
+~ Lava slice 14 — Screen: a write-only origin you render pixels to.
+~ Drawing is a write, so an action that draws declares `writes Screen` exactly as
+~ a printing one declares `writes Console`. "Which actions can draw?" stays a
+~ header grep, like every other capability in the language.
+
+create screen of size 16 by 16
+
+~ the frame starts black; lay a background down first
+fill screen with rgb 20, 20, 28
+
+~ a gradient. Colour channels are EXPRESSIONS, so the pixel's colour is computed
+~ from the cursors — which is the whole point of a pixel screen over a palette.
+loop (create container "y" of type int with value 0) until (y is 16)
+  loop (create container "x" of type int with value 0) until (x is 16)
+    set pixel x, y to rgb [x * 17], [y * 17], 128
+    update x to [x + 1]
+  end
+  update y to [y + 1]
+end
+
+~ the same drawing, but sealed in an action: the footprint has to admit Screen
+create container "I" of type int with value 0
+
+create action "DrawBorderPixel" reads I writes Screen as
+  set pixel I, 0 to white
+  set pixel I, 15 to white
+  set pixel 0, I to white
+  set pixel 15, I to white
+end
+
+loop 16 times
+  DrawBorderPixel()
+  update I to [I + 1]
+end
+
+~ `show` presents the frame. A program that drew but never called it still gets
+~ one frame flushed at exit; an animation needs `show` once per frame.
+show
+print("rendered 16 by 16")

@@ -34,12 +34,28 @@ const KEYWORDS = new Set([
   'overwrite', 'contents', 'name', 'Line', 'of',
   'UserInput', 'wait', 'synchronous', 'actions',
   'between', 'less', 'greater', 'than',
+  'screen', 'size', 'by', 'set', 'pixel', 'fill', 'show', 'rgb',
   'EOF',
 ]);
+
+// Colour names are resolved by the colour parser, NOT reserved as keywords —
+// otherwise a container could never be called "Red". rgb R, G, B covers the rest.
+const COLORS = new Map([
+  ['black', [0, 0, 0]], ['white', [255, 255, 255]], ['gray', [128, 128, 128]],
+  ['grey', [128, 128, 128]], ['red', [255, 0, 0]], ['green', [0, 128, 0]],
+  ['lime', [0, 255, 0]], ['blue', [0, 0, 255]], ['yellow', [255, 255, 0]],
+  ['cyan', [0, 255, 255]], ['magenta', [255, 0, 255]], ['orange', [255, 165, 0]],
+  ['purple', [128, 0, 128]], ['brown', [139, 69, 19]], ['pink', [255, 192, 203]],
+]);
+// A frame is one line on stdout so it rides the same pipe as print, and the IDE
+// lifts it back out (@lava-run). Raw RGB, base64: the browser draws it straight
+// into an ImageData, so no encoder is needed on either end.
+const FRAME_MARKER = '[[lava:frame';
+const MAX_SCREEN_DIM = 512;
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
 const READABLE_ORIGINS = new Set(['UserInput']);
-const WRITABLE_ORIGINS = new Set(['Console']);
+const WRITABLE_ORIGINS = new Set(['Console', 'Screen']);
 
 class LavaError extends Error {}
 class BreakSignal {} // control-flow sentinel for `break`, caught by the enclosing loop
@@ -329,8 +345,19 @@ class Parser {
   parseCreate() {
     this.expect('word', 'create');
     const w = this.expect('word');
+    // create screen of size <W> by <H> — the one declaration with no value: a
+    // screen's contents start blank, and its identity is its dimensions.
+    if (w.value === 'screen') {
+      this.expect('word', 'of'); this.expect('word', 'size');
+      const width = parseInt(this.expect('number').value, 10);
+      this.expect('word', 'by');
+      const height = parseInt(this.expect('number').value, 10);
+      if (width < 1 || height < 1 || width > MAX_SCREEN_DIM || height > MAX_SCREEN_DIM)
+        throw new LavaError(`screen size must be 1..${MAX_SCREEN_DIM} in each dimension, got ${width} by ${height} (line ${w.line})`);
+      return { kind: 'screen', width, height, line: w.line };
+    }
     if (w.value !== 'container' && w.value !== 'constant')
-      throw new LavaError(`Expected 'container' or 'constant', got '${w.value}' (line ${w.line})`);
+      throw new LavaError(`Expected 'container', 'constant' or 'screen', got '${w.value}' (line ${w.line})`);
     const name = this.expect('string').value;
     this.expect('word', 'of'); this.expect('word', 'type');
     const types = this.parseType();
@@ -465,6 +492,25 @@ class Parser {
       this.expect('word', 'to'); const expr = this.parseExpr();
       return { op: 'update', name, expr };
     }
+    // Screen writes. All three are writes to the `Screen` origin, so an action
+    // that draws must declare `writes Screen` — same rule `print` follows for
+    // Console, which is what makes "who can draw?" a header grep.
+    if (this.isWord('set')) {
+      this.next(); this.expect('word', 'pixel');
+      const x = this.parseExpr();
+      this.expect(',');
+      const y = this.parseExpr();
+      this.expect('word', 'to');
+      return { op: 'setPixel', x, y, color: this.parseColor(), line: tok.line };
+    }
+    if (this.isWord('fill')) {
+      this.next(); this.expect('word', 'screen'); this.expect('word', 'with');
+      return { op: 'fillScreen', color: this.parseColor(), line: tok.line };
+    }
+    if (this.isWord('show')) {
+      this.next();
+      return { op: 'show', line: tok.line };
+    }
     if (this.isWord('overwrite')) {
       this.next(); this.expect('(');
       const target = this.parseTarget();
@@ -476,6 +522,26 @@ class Parser {
     if (tok.type === 'word' && !KEYWORDS.has(tok.value)) return this.parseCall(); // action call
     throw new LavaError(`Expected an effect (print / update / action call), got '${tok.value || tok.type}' (line ${tok.line})`);
   }
+  // a colour is `rgb <expr>, <expr>, <expr>` or a name from COLORS. Channels are
+  // expressions, not literals, so a colour can be computed from container state —
+  // that is the whole point of a pixel screen.
+  parseColor() {
+    if (this.eatWord('rgb')) {
+      const r = this.parseExpr(); this.expect(',');
+      const g = this.parseExpr(); this.expect(',');
+      const b = this.parseExpr();
+      return { kind: 'rgb', r, g, b };
+    }
+    const t = this.peek();
+    if (t.type === 'word' && COLORS.has(t.value.toLowerCase())) {
+      this.next();
+      return { kind: 'named', rgb: COLORS.get(t.value.toLowerCase()) };
+    }
+    throw new LavaError(
+      `Expected a colour — 'rgb <r>, <g>, <b>' or one of ${[...COLORS.keys()].join(', ')} — got '${t.value || t.type}' (line ${t.line})`
+    );
+  }
+
   parseCall() {
     if (this.inAction)
       throw new LavaError(`Actions cannot call other actions (line ${this.peek().line})`);
@@ -745,6 +811,9 @@ function collectReadsWrites(stmts) {
     else if (n.kind === 'binop') { expr(n.left); expr(n.right); }
     else if (n.kind === 'sqrt') expr(n.operand);
   };
+  const color = (c) => {
+    if (c && c.kind === 'rgb') { expr(c.r); expr(c.g); expr(c.b); }
+  };
   const pred = (n) => {
     if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left); expr(n.right); }
     else if (n.kind === 'isCase') expr(n.left);
@@ -756,6 +825,12 @@ function collectReadsWrites(stmts) {
     else if (e.op === 'updateField') { writes.add(e.cls); expr(e.expr); }
     else if (e.op === 'print') { writes.add('Console'); expr(e.expr); }
     else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value); }
+    // Screen writes. Coordinates and colour channels are expressions, so their
+    // reads count toward the footprint too — drawing from a container's value
+    // means the action must declare it read.
+    else if (e.op === 'setPixel') { writes.add('Screen'); expr(e.x); expr(e.y); color(e.color); }
+    else if (e.op === 'fillScreen') { writes.add('Screen'); color(e.color); }
+    else if (e.op === 'show') writes.add('Screen');
     // 'break' / 'call' touch no state and never appear in an action body
   };
   const stmt = (s) => {
@@ -773,6 +848,8 @@ class Interpreter {
     this.classes = new Map(); this.states = new Map();
     this.names = new Set(); this.constants = new Set();
     this.baseDir = baseDir;
+    this.screen = null;  // { width, height, buf } — the Screen origin's framebuffer
+    this.screenDirty = false; // writes since the last `show`, so exit can flush one
     this.suspended = []; // { cond, effects, line } reactive waits awaiting a mutation
     this.waking = false; // reentrancy guard so updates inside wake() don't recurse
     this.deferWake = 0;  // >0 inside a synchronous block: updates don't wake yet
@@ -1023,6 +1100,15 @@ class Interpreter {
         if (cell.bound) this.checkBound(stmt.name, cell); // initial value must satisfy
         return;
       }
+      case 'screen': {
+        if (this.screen) throw new LavaError(`a screen is already declared (line ${stmt.line})`);
+        this.screen = {
+          width: stmt.width,
+          height: stmt.height,
+          buf: new Uint8Array(stmt.width * stmt.height * 3), // starts black
+        };
+        return;
+      }
       case 'effects': return stmt.effects.forEach(e => this.effect(e));
       case 'if': {
         if (this.evalPred(stmt.pred)) stmt.thenE.forEach(e => this.effect(e));
@@ -1097,9 +1183,68 @@ class Interpreter {
   }
   runBody(body) { for (const s of body) this.exec(s); }
 
+  // ---------- Screen ----------
+  requireScreen(line) {
+    if (!this.screen)
+      throw new LavaError(`no screen is declared — add 'create screen of size <w> by <h>' (line ${line})`);
+    return this.screen;
+  }
+  // Coordinates and colour channels are ordinary expressions; they must resolve
+  // to ints, so a string container used as a coordinate fails by name.
+  intOperand(node, what, line) {
+    const v = this.evalExpr(node);
+    if (v.type !== 'int') throw new LavaError(`${what} must be an int, got ${v.type} (line ${line})`);
+    return v.value;
+  }
+  evalColor(c, line) {
+    if (c.kind === 'named') return c.rgb;
+    const ch = (node, name) => {
+      const n = this.intOperand(node, `colour channel ${name}`, line);
+      if (n < 0 || n > 255)
+        throw new LavaError(`colour channel ${name} must be 0..255, got ${n} (line ${line})`);
+      return n;
+    };
+    return [ch(c.r, 'r'), ch(c.g, 'g'), ch(c.b, 'b')];
+  }
+  // One frame, one line. Base64 of raw RGB — the browser drops it straight into
+  // an ImageData, so neither side needs an image encoder.
+  showFrame(line) {
+    const s = this.requireScreen(line);
+    process.stdout.write(
+      `${FRAME_MARKER} ${s.width} ${s.height} ${Buffer.from(s.buf).toString('base64')}]]\n`
+    );
+    this.screenDirty = false;
+  }
+  // A program that drew but never said `show` still meant to be seen.
+  flushScreen() {
+    if (this.screen && this.screenDirty) this.showFrame(0);
+  }
+
   effect(e) {
     if (e.op === 'break') throw new BreakSignal();
     if (e.op === 'print') { process.stdout.write(String(this.evalExpr(e.expr).value) + '\n'); return; }
+    if (e.op === 'setPixel') {
+      const s = this.requireScreen(e.line);
+      const x = this.intOperand(e.x, 'pixel x', e.line);
+      const y = this.intOperand(e.y, 'pixel y', e.line);
+      // Out of range is a failure, not a silently dropped write: a program that
+      // draws off-screen is wrong about its own map.
+      if (x < 0 || y < 0 || x >= s.width || y >= s.height)
+        throw new LavaError(`pixel ${x},${y} is outside the screen (${s.width} by ${s.height}) (line ${e.line})`);
+      const [r, g, b] = this.evalColor(e.color, e.line);
+      const i = (y * s.width + x) * 3;
+      s.buf[i] = r; s.buf[i + 1] = g; s.buf[i + 2] = b;
+      this.screenDirty = true;
+      return;
+    }
+    if (e.op === 'fillScreen') {
+      const s = this.requireScreen(e.line);
+      const [r, g, b] = this.evalColor(e.color, e.line);
+      for (let i = 0; i < s.buf.length; i += 3) { s.buf[i] = r; s.buf[i + 1] = g; s.buf[i + 2] = b; }
+      this.screenDirty = true;
+      return;
+    }
+    if (e.op === 'show') { this.showFrame(e.line); return; }
     if (e.op === 'update') {
       const cell = this.env.get(e.name);
       if (!cell) throw new LavaError(`'${e.name}' is not declared`);
@@ -1379,9 +1524,14 @@ function num(x) { return { type: Number.isInteger(x) ? 'int' : 'float', value: x
 // ---------- CLI ----------
 const file = process.argv[2];
 if (!file) { console.error('usage: node lava.mjs <file.lava>'); process.exit(2); }
+const interp = new Interpreter(dirname(file));
 try {
-  new Interpreter(dirname(file)).run(readFileSync(file, 'utf8'));
+  interp.run(readFileSync(file, 'utf8'));
+  interp.flushScreen(); // drew but never said `show` — still meant to be seen
 } catch (e) {
+  // A failed run still shows what it managed to draw: the last good frame is
+  // usually the evidence for why it failed.
+  try { interp.flushScreen(); } catch {}
   if (e instanceof LavaError) { console.error('lava: ' + e.message); process.exit(1); }
   throw e;
 }

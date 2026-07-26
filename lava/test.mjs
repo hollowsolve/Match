@@ -35,8 +35,14 @@ const cases = [
   // expected-rejection cases: nonzero exit
   ['reads.lava', '', 0, 'line one\nline two\nline three\nline one\nline two\nline 9 is past the end\nline 1 exists'],
   ['fields.lava', '', 0, 'alice\nbob\n|bob|admin|'],
+  // Screen: the frame wire format is pinned on a 2x1 screen (6 bytes of raw RGB
+  // = red then blue), so a change to the marker or the encoding fails here.
+  ['screen-tiny.lava', '', 0, '[[lava:frame 2 1 /wAAAAD/]]'],
+  ['screen.lava', '', 0, null], // full 16x16 frame — exercised, output too large to pin
   // expected-rejection cases: nonzero exit
   ['escalation.lava', '', 1, null],
+  // drawing obeys footprints: an action that draws must declare `writes Screen`
+  ['screen-footprint.lava', '', 1, "lava: action 'Undeclared':\n  - writes 'Screen' but does not declare it (writes: none)"],
   ['bounds-violation.lava', '', 1, null],
   // every bound form, plus the strict-bound message (a strict bound must not
   // report itself as inclusive): >= <= between accept endpoints, > < reject them

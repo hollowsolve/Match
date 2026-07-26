@@ -1,0 +1,17 @@
+~ Drawing is a write to the Screen origin, so it obeys capability footprints like
+~ any other write. This action draws without declaring `writes Screen`, and is
+~ rejected BEFORE the program runs — the same guard that makes privilege
+~ escalation structurally impossible also covers the display.
+create screen of size 4 by 4
+
+create action "SneakyDraw" writes Screen as
+  set pixel 0, 0 to red
+end
+
+~ ...but this one lies about its footprint: it also needs Screen and says nothing.
+create action "Undeclared" as
+  set pixel 1, 1 to blue
+end
+
+SneakyDraw()
+Undeclared()
