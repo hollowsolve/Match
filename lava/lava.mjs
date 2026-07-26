@@ -33,7 +33,7 @@ const KEYWORDS = new Set([
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
   'UserInput', 'wait', 'synchronous', 'actions',
-  'never', 'less', 'greater', 'than',
+  'between', 'less', 'greater', 'than',
   'EOF',
 ]);
 const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
@@ -249,6 +249,15 @@ function lexLine(line, lineNo) {
       continue;
     }
     if ('()[],:'.includes(ch)) { push(ch, ch, i + 1); i++; continue; }
+    // Bound comparators. A distinct 'cmp' type, not 'op': these are declaration
+    // refinements, never arithmetic, and predicates still use prose comparators.
+    // Two-char forms are matched first so '>=' never lexes as '>' then '='.
+    if (ch === '>' || ch === '<') {
+      const start = i; i++;
+      if (line[i] === '=') { i++; push('cmp', ch + '=', start + 1); }
+      else push('cmp', ch, start + 1);
+      continue;
+    }
     if (BINOPS.has(ch)) { push('op', ch, i + 1); i++; continue; }
     if (isLetter(ch)) {
       const start = i; let w = '';
@@ -332,32 +341,57 @@ class Parser {
     return { kind: 'create', isConst: w.value === 'constant', name, types, value, bound, states };
   }
 
-  // optional bound, between the type and `with value`, using prose comparators:
-  //   never less than <N|C>    (value >= N|C — a minimum)
-  //   never greater than <N|C> (value <= N|C — a maximum)
-  // multiple clauses join with `and`. N is a literal, C another container.
+  // optional bound, between the type and `with value`:
+  //   >= <N|C>              a minimum, inclusive
+  //   >  <N|C>              a minimum, strict
+  //   <= <N|C>              a maximum, inclusive
+  //   <  <N|C>              a maximum, strict
+  //   between <N|C> and <N|C>   both endpoints, inclusive
+  // Symbols rather than prose here on purpose: a bound is dense, it is read at a
+  // glance, and `>=` cannot be misread the way "never less than" could. Prose
+  // comparators stay prose in predicates, where they read as sentences.
+  // Multiple clauses join with `and` (`>= 0 and <= 100` is `between 0 and 100`).
+  // N is a literal, C another container.
   parseBound(types) {
-    if (!this.isWord('never')) return null;
+    const t = this.peek();
+    const between = this.isWord('between');
+    // The pre-symbol spelling. Say so plainly instead of failing as a missing
+    // 'with' three tokens later.
+    if (this.isWord('never')) {
+      const kind = this.peek(1) && this.peek(1).value === 'greater' ? '<=' : '>=';
+      throw new LavaError(
+        `'never less/greater than' is no longer a bound (line ${t.line}). Use '${kind}', '>', '<', or 'between X and Y'.`
+      );
+    }
+    if (t.type !== 'cmp' && !between) return null;
     if (!(types.length === 1 && types[0] === 'int'))
-      throw new LavaError(`bounds apply only to 'int' containers (line ${this.peek().line})`);
+      throw new LavaError(`bounds apply only to 'int' containers (line ${t.line})`);
+
+    if (between) {
+      this.next();
+      const lo = this.parseBoundOperand('min', true);
+      this.expect('word', 'and');
+      const hi = this.parseBoundOperand('max', true);
+      return [lo, hi];
+    }
+
     const checks = [];
     do {
-      this.expect('word', 'never');
-      if (this.eatWord('less')) { this.expect('word', 'than'); checks.push(this.parseBoundOperand('min')); }
-      else if (this.eatWord('greater')) { this.expect('word', 'than'); checks.push(this.parseBoundOperand('max')); }
-      else throw new LavaError(`Expected 'less than' or 'greater than' after 'never' (line ${this.peek().line})`);
+      const c = this.expect('cmp');
+      const side = c.value[0] === '>' ? 'min' : 'max';
+      checks.push(this.parseBoundOperand(side, c.value.length === 2));
     } while (this.eatWord('and'));
     return checks;
   }
-  parseBoundOperand(side) {
+  parseBoundOperand(side, inclusive) {
     const t = this.peek();
     if (t.type === 'number' || (t.type === 'op' && t.value === '-')) {
       let neg = false;
       if (t.type === 'op') { this.next(); neg = true; }
       const n = this.expect('number');
-      return { side, value: (neg ? -1 : 1) * parseInt(n.value, 10) };
+      return { side, inclusive, value: (neg ? -1 : 1) * parseInt(n.value, 10) };
     }
-    return { side, ref: this.parseName() };
+    return { side, inclusive, ref: this.parseName() };
   }
 
   // optional `from states ( <name> if <predicate>, … )`. Each state is a named
@@ -1115,11 +1149,12 @@ class Interpreter {
     this.wake(); // single wake after the whole transaction lands
   }
 
-  // A bound is a refinement on an int container: at least / at most a literal,
-  // or never above / below another container. Checked after every write outside
-  // a transaction, and once at commit inside one — so the bad state is never
-  // observable. (A relational bound reads its reference for validation only;
-  // that is language-level enforcement, not part of the action's footprint.)
+  // A bound is a refinement on an int container: a minimum or maximum, inclusive
+  // (`>=`, `<=`, `between`) or strict (`>`, `<`), against a literal or another
+  // container. Checked after every write outside a transaction, and once at commit
+  // inside one — so the bad state is never observable. (A relational bound reads
+  // its reference for validation only; that is language-level enforcement, not
+  // part of the action's footprint.)
   checkBound(name, cell) {
     if (!cell.bound) return;
     const v = cell.value.value;
@@ -1131,10 +1166,16 @@ class Interpreter {
         if (r.value.type !== 'int') throw new LavaError(`bound reference '${chk.ref}' must be an int container`);
         limit = r.value.value; label = `${chk.ref} (${limit})`;
       } else { limit = chk.value; label = `${limit}`; }
-      if (chk.side === 'min' && v < limit)
-        throw new LavaError(`'${name}' is ${v}, violating bound: must be at least ${label}`);
-      if (chk.side === 'max' && v > limit)
-        throw new LavaError(`'${name}' is ${v}, violating bound: must be at most ${label}`);
+      // The message names the bound that actually failed, so a strict bound never
+      // reports itself as inclusive.
+      if (chk.side === 'min' && (chk.inclusive ? v < limit : v <= limit))
+        throw new LavaError(
+          `'${name}' is ${v}, violating bound: must be ${chk.inclusive ? 'at least' : 'greater than'} ${label}`
+        );
+      if (chk.side === 'max' && (chk.inclusive ? v > limit : v >= limit))
+        throw new LavaError(
+          `'${name}' is ${v}, violating bound: must be ${chk.inclusive ? 'at most' : 'less than'} ${label}`
+        );
     }
   }
   checkAllBounds() {

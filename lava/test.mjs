@@ -38,6 +38,9 @@ const cases = [
   // expected-rejection cases: nonzero exit
   ['escalation.lava', '', 1, null],
   ['bounds-violation.lava', '', 1, null],
+  // every bound form, plus the strict-bound message (a strict bound must not
+  // report itself as inclusive): >= <= between accept endpoints, > < reject them
+  ['bounds-between.lava', '', 1, "0\n100\n1\n9\n12\nlava: 'Quantity' is 0, violating bound: must be greater than 0"],
 ];
 
 let pass = 0, fail = 0;

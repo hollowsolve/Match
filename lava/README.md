@@ -69,13 +69,19 @@ A numeric refinement is part of a container's identity, so the bad state cannot
 exist (and there's no separate rule to drift out of sync):
 
 ```
-create container "Credit" of type int never less than 0 with value 100
-create container "Hold"   of type int never greater than Credit with value 0
+create container "Credit" of type int >= 0 with value 100
+create container "Hold"   of type int <= Credit with value 0
+create container "temp"   of type int between 0 and 100 with value 65
 ```
 
-`never less than <N|C>` · `never greater than <N|C>`, joined with `and`; `N` is a
-literal, `C` another container. Every write is checked; a violation undoes the
-write and fails.
+`>= <N|C>` · `> <N|C>` · `<= <N|C>` · `< <N|C>` · `between <N|C> and <N|C>`, where
+`N` is a literal and `C` another container. `>=` `<=` `between` include their
+endpoints; `>` `<` exclude them. Clauses join with `and`, so `>= 0 and <= 100` is
+`between 0 and 100`. Every write is checked; a violation undoes the write and fails.
+
+Bounds are the one place Lava uses symbols instead of prose. A bound is dense and
+read at a glance, and `>=` cannot be misread the way "never less than" could —
+whereas a predicate reads as a sentence, so comparators there stay prose.
 
 ### Guards, predicates, comparators
 
@@ -299,6 +305,7 @@ node lava/lava.mjs lava/examples/sync.lava                # atomic transaction
 node lava/lava.mjs lava/examples/bounds.lava              # invariants on containers
 node lava/lava.mjs lava/examples/bounds-atomic.lava       # dip-through, commit consistent
 node lava/lava.mjs lava/examples/bounds-violation.lava    # a violation is rejected
+node lava/lava.mjs lava/examples/bounds-between.lava      # every bound form, strict vs inclusive
 node lava/lava.mjs lava/examples/states.lava             # states as named conditions
 node lava/lava.mjs lava/examples/reads.lava              # contents / Line / EOF reads
 node lava/lava.mjs lava/examples/fields.lava             # read/write-symmetric fields
@@ -313,7 +320,7 @@ the repo root). The interpreter (`lava.mjs`) has no other dependencies.
 ## The whole surface
 
 ```
-create container "<name>" of type <type> [<bound>] with value <value>
+create container "<name>" of type <type> [<bound>] [<states>] with value <value>
 create constant  "<name>" of type <type> with value <value>
 create action "<name>" [reads <list>] [writes <list>] as <body> end
 create pattern "<name>" as <clauses> end
@@ -339,8 +346,9 @@ Name()                                          ~ action / synchronous-block cal
 ~ comment
 ```
 
-**Bounds:** `never less than <N|C>` · `never greater than <N|C>`, joined with
-`and` (int containers).
+**Bounds:** `>= <N|C>` · `> <N|C>` · `<= <N|C>` · `< <N|C>` ·
+`between <N|C> and <N|C>`, joined with `and` (int containers). `>=` `<=` `between`
+are inclusive; `>` `<` are strict.
 **States:** `from states ( <name> if <predicate>, … )` on a container — each
 state is a named condition; `is <state>` evaluates it.
 **Predicates:** `is`, `and`, `or`, `not`, parens.

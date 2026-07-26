@@ -1,0 +1,26 @@
+~ Lava — the bound forms. Symbols, because a bound is read at a glance:
+~   >= <N|C>  >  <N|C>  <= <N|C>  <  <N|C>  between <N|C> and <N|C>
+~ >= <= between include their endpoints; > < exclude them.
+
+~ inclusive range — 0 and 100 are both legal values
+create container "Temp" of type int between 0 and 100 with value 0
+print(Temp)
+update Temp to 100
+print(Temp)
+
+~ strict minimum: 0 would be rejected, 1 is the smallest legal value
+create container "Quantity" of type int > 0 with value 1
+print(Quantity)
+
+~ strict maximum against another container — Ceiling itself is out of range
+create container "Ceiling" of type int with value 10
+create container "Draw" of type int < Ceiling with value 9
+print(Draw)
+
+~ clauses join with `and`; this is exactly `between 1 and 12`
+create container "Month" of type int >= 1 and <= 12 with value 12
+print(Month)
+
+~ the strict bound bites here: 0 is not greater than 0, so this write fails
+update Quantity to 0
+print("never reached")

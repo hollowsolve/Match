@@ -2,13 +2,13 @@
 ~ comparators. A bound is part of the container's identity; the bad state can't exist.
 
 ~ literal bound: balance can never go negative
-create container "Credit" of type int never less than 0 with value 100
+create container "Credit" of type int >= 0 with value 100
 
 ~ relational bound: a hold can never exceed the credit backing it
-create container "Hold" of type int never greater than Credit with value 0
+create container "Hold" of type int <= Credit with value 0
 
 ~ legal moves
-update Credit to [Credit - 40]      ~ 60, still never less than 0
+update Credit to [Credit - 40]      ~ 60, still >= 0
 update Hold to 60                    ~ 60, not greater than Credit (60)
 print(Credit)
 print(Hold)
