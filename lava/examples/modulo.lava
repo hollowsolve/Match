@@ -1,0 +1,37 @@
+~ Lava slice 15 — `%` remainder.
+~ Operands are always ints, and the sign follows the DIVIDEND.
+
+create container "Result" of type int with value 0
+
+update Result to [7 % 3]
+print(Result)
+
+update Result to [64 % 8]
+print(Result)
+
+~ the dividend is smaller than the divisor, so it comes back unchanged
+update Result to [5 % 64]
+print(Result)
+
+~ sign follows the dividend: -1, not 2
+update Result to [-7 % 3]
+print(Result)
+
+~ nests like any other operation; brackets are still required
+update Result to [[10 % 4] + 1]
+print(Result)
+
+~ the practical use: a column from a flat index
+create constant "Width" of type int with value 8
+create container "Index" of type int with value 0
+create container "Column" of type int with value 0
+
+loop 10 times
+  update Column to [Index % Width]
+  print(Column)
+  update Index to [Index + 1]
+end
+
+~ ...but a remainder by zero has no answer, and fails rather than inventing one
+update Result to [5 % 0]
+print("never reached")

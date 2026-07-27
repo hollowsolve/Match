@@ -52,7 +52,7 @@ const COLORS = new Map([
 // into an ImageData, so no encoder is needed on either end.
 const FRAME_MARKER = '[[lava:frame';
 const MAX_SCREEN_DIM = 512;
-const BINOPS = new Set(['+', '-', '*', '/', '^', '√']);
+const BINOPS = new Set(['+', '-', '*', '/', '%', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
 const READABLE_ORIGINS = new Set(['UserInput']);
 const WRITABLE_ORIGINS = new Set(['Console', 'Screen']);
@@ -286,6 +286,12 @@ function lexLine(line, lineNo) {
   push('eol', '', line.length + 1);
   return tokens;
 }
+// Leading-keyword tests must not care how a line is aligned. Collapse runs of
+// whitespace FOR THE TEST ONLY — never for what gets lexed, since a string
+// literal's own spacing is content. Safe for prefix tests: only the opening
+// keywords are inspected, and any literal comes after them.
+function kw(text) { return text.replace(/\s+/g, ' '); }
+
 function endsWithAs(text) {
   const toks = lexLine(text, 0);
   for (let i = toks.length - 1; i >= 0; i--) {
@@ -864,9 +870,12 @@ class Interpreter {
     }
 
     // pre-scan every declared name (loop-local containers live on the loop
-    // header line) so footprints and multi-word refs resolve
+    // header line) so footprints and multi-word refs resolve.
+    // \s+ rather than a single space: people ALIGN their declarations, and a
+    // missed name here fails much later as a confusing parse error at the
+    // reference rather than at the declaration.
     for (const { text } of this.lines) {
-      const m = text.match(/create (container|constant) "([^"]+)"/);
+      const m = text.match(/create\s+(container|constant)\s+"([^"]+)"/);
       if (m) { this.names.add(m[2]); if (m[1] === 'constant') this.constants.add(m[2]); }
     }
 
@@ -963,7 +972,7 @@ class Interpreter {
         throw new LavaError(`Unexpected 'end' (line ${line})`);
       }
 
-      if (text === 'create synchronous actions' || text.startsWith('create synchronous actions ')) {
+      if (kw(text) === 'create synchronous actions' || kw(text).startsWith('create synchronous actions ')) {
         let header = text; this.cursor++;
         while (!endsWithAs(header)) {
           if (this.cursor >= this.lines.length) throw new LavaError(`Synchronous actions header missing 'as' (line ${line})`);
@@ -978,7 +987,7 @@ class Interpreter {
         continue;
       }
 
-      if (text === 'create action' || text.startsWith('create action ')) {
+      if (kw(text) === 'create action' || kw(text).startsWith('create action ')) {
         let header = text; this.cursor++;
         while (!endsWithAs(header)) {
           if (this.cursor >= this.lines.length) throw new LavaError(`Action header missing 'as' (line ${line})`);
@@ -989,14 +998,14 @@ class Interpreter {
         continue;
       }
 
-      if (text === 'create pattern' || text.startsWith('create pattern ')) {
+      if (kw(text) === 'create pattern' || kw(text).startsWith('create pattern ')) {
         // header is `create pattern "name" as`; body runs until `end`
         let header = text; this.cursor++;
         while (!endsWithAs(header)) {
           if (this.cursor >= this.lines.length) throw new LavaError(`Pattern header missing 'as' (line ${line})`);
           header += ' ' + this.lines[this.cursor].text; this.cursor++;
         }
-        const nameMatch = header.match(/create pattern "([^"]+)" as$/);
+        const nameMatch = kw(header).match(/create pattern "([^"]+)" as$/);
         if (!nameMatch) throw new LavaError(`Malformed pattern header (line ${line})`);
         const bodyLines = [];
         while (this.cursor < this.lines.length && this.lines[this.cursor].text !== 'end')
@@ -1009,27 +1018,27 @@ class Interpreter {
 
       // class/state declarations have no `end`: they continue while the
       // accumulated text ends with a continuation token (`,`, `where`, `states`)
-      if (text === 'create class' || text.startsWith('create class ')) {
+      if (kw(text) === 'create class' || kw(text).startsWith('create class ')) {
         let acc = text; this.cursor++;
         while (this.cursor < this.lines.length && /(,|where)$/.test(acc.trim())) acc += ' ' + this.lines[this.cursor++].text;
         units.push({ kind: 'class', text: acc, line });
         continue;
       }
-      if (text === 'create state' || text.startsWith('create state ')) {
+      if (kw(text) === 'create state' || kw(text).startsWith('create state ')) {
         let acc = text; this.cursor++;
         while (this.cursor < this.lines.length && /(,|states)$/.test(acc.trim())) acc += ' ' + this.lines[this.cursor++].text;
         units.push({ kind: 'state', text: acc, line });
         continue;
       }
 
-      if (text === 'loop' || text.startsWith('loop ') || text.startsWith('loop(')) {
+      if (kw(text) === 'loop' || kw(text).startsWith('loop ') || kw(text).startsWith('loop(')) {
         const header = text; this.cursor++;
         const bodyUnits = this.readUnits(true);
         units.push({ kind: 'loop', header, line, bodyUnits });
         continue;
       }
 
-      if ((text === 'else' || text.startsWith('else ')) && units.length && units[units.length - 1].kind === 'stmt') {
+      if ((kw(text) === 'else' || kw(text).startsWith('else ')) && units.length && units[units.length - 1].kind === 'stmt') {
         units[units.length - 1].text += ' ' + text; this.cursor++; continue;
       }
 
@@ -1389,7 +1398,16 @@ class Interpreter {
           case '+': return num(a + b);
           case '-': return num(a - b);
           case '*': return num(a * b);
-          case '/': return num(a / b);
+          // Dividing by zero has no answer, so it fails by name rather than
+          // producing Infinity and failing later as "cannot hold a float value".
+          case '/':
+            if (b === 0) throw new LavaError('division by zero');
+            return num(a / b);
+          // Remainder. Operands are always ints (numeric() enforces it), and the
+          // sign follows the DIVIDEND: [-7 % 3] is -1, not 2.
+          case '%':
+            if (b === 0) throw new LavaError('remainder by zero');
+            return num(a % b);
           case '^': return num(Math.pow(a, b));
           case '√': return num(Math.pow(b, 1 / a));
         }

@@ -39,6 +39,11 @@ const cases = [
   // = red then blue), so a change to the marker or the encoding fails here.
   ['screen-tiny.lava', '', 0, '[[lava:frame 2 1 /wAAAAD/]]'],
   ['screen.lava', '', 0, null], // full 16x16 frame — exercised, output too large to pin
+  // aligned declarations/headers must parse identically to tight ones, while
+  // spacing inside a string literal stays content
+  ['alignment.lava', '', 0, '484\ninside\n3\nhello   world'],
+  // `%` remainder, incl. negative dividend sign and remainder-by-zero failing
+  ['modulo.lava', '', 1, '1\n0\n5\n-1\n3\n0\n1\n2\n3\n4\n5\n6\n7\n0\n1\nlava: remainder by zero'],
   // expected-rejection cases: nonzero exit
   ['escalation.lava', '', 1, null],
   // drawing obeys footprints: an action that draws must declare `writes Screen`

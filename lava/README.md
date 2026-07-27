@@ -60,8 +60,14 @@ update Score to [Score + 10]
 ```
 
 Types (`int`, `string`, unions like `string/int`) are mandatory and checked on
-every write. Math uses `+ - * / ^ √` (and n-th root, `n√x`); more than one
+every write. Math uses `+ - * / % ^ √` (and n-th root, `n√x`); more than one
 operation **requires** brackets — `[[a + b] * c]`, never `a + b * c`.
+
+`%` is remainder, its sign following the dividend. Division is the sharp edge:
+`/` produces a float unless it divides exactly, and since the only types are `int`
+and `string`, **no container can hold that result** — there is no integer division
+and no floor. So `[Index % Width]` gives you a column, but a row cannot be
+recovered from a flat index; iterate rows and columns as nested cursors instead.
 
 ### Bounds — invariants that can't be broken
 
@@ -346,6 +352,7 @@ node lava/lava.mjs lava/examples/bounds-violation.lava    # a violation is rejec
 node lava/lava.mjs lava/examples/bounds-between.lava      # every bound form, strict vs inclusive
 node lava/lava.mjs lava/examples/screen.lava             # pixels: gradient + border
 node lava/lava.mjs lava/examples/screen-footprint.lava   # drawing obeys footprints
+node lava/lava.mjs lava/examples/modulo.lava             # `%` remainder
 node lava/lava.mjs lava/examples/states.lava             # states as named conditions
 node lava/lava.mjs lava/examples/reads.lava              # contents / Line / EOF reads
 node lava/lava.mjs lava/examples/fields.lava             # read/write-symmetric fields
@@ -399,7 +406,10 @@ state is a named condition; `is <state>` evaluates it.
 **Predicates:** `is`, `and`, `or`, `not`, parens.
 **Comparators (prose):** `is` · `less than` · `greater than` · `less than or is` ·
 `greater than or is`.
-**Math:** `+ - * / ^ √`, n-th root; brackets required for >1 operation.
+**Math:** `+ - * / % ^ √`, n-th root; brackets required for >1 operation. `%` is
+remainder, sign following the dividend (`[-7 % 3]` is `-1`). Dividing or taking a
+remainder by zero fails by name. `/` yields a float unless it divides exactly, and
+no container can hold a float — there is no integer division or floor.
 
 ---
 

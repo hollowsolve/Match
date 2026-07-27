@@ -1,0 +1,32 @@
+~ Declarations are often ALIGNED for readability. That must not change meaning.
+~ It used to: the name pre-scan matched a single literal space, so an aligned
+~ `create constant  "Centre Column"` was never registered as a name, and the
+~ failure surfaced later as a parse error at the *reference* rather than at the
+~ declaration. Multi-word names made it easy to hit.
+
+create constant  "Centre Column"     of type int with value 32
+create constant  "Radius Squared"    of type int with value 484
+create container "Column"            of type int with value 10
+create container "Column Offset"     of type int with value 0
+create container "Distance Squared"  of type int >= 0 with value 0
+create container "Total"             of type int with value 0
+
+update Column Offset     to [Column - Centre Column]
+update Distance Squared  to [Column Offset * Column Offset]
+print(Distance Squared)
+
+if (Distance Squared less than or is Radius Squared) then print("inside")
+else print("outside")
+
+~ aligned headers parse the same as tight ones
+create  action  "Bump"  reads Total  writes Total  as
+  update Total to [Total + 1]
+end
+
+loop  3  times
+  Bump()
+end
+print(Total)
+
+~ ...but spacing INSIDE a string literal is content, and is left alone
+print("hello   world")
