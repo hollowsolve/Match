@@ -60,6 +60,13 @@ const WRITABLE_ORIGINS = new Set(['Console', 'Screen']);
 class LavaError extends Error {}
 class BreakSignal {} // control-flow sentinel for `break`, caught by the enclosing loop
 
+// A file the host REFUSED and a file that isn't there are different failures:
+// the first is the environment saying no, the second is the program pointing at
+// nothing. Reporting both as "cannot read its data" makes a permission problem
+// read as a typo, and sends whoever is debugging to the wrong place entirely.
+// Node raises ERR_ACCESS_DENIED for both --permission denials and EACCES.
+const isDenied = (e) => e?.code === 'ERR_ACCESS_DENIED' || e?.code === 'EACCES';
+
 // Read one line from stdin synchronously (UserInput "accepts with newline").
 // Execution is top-to-bottom and single-threaded, so a blocking read fits the
 // model. Returns the line without its trailing newline; '' at EOF.
@@ -1344,26 +1351,45 @@ class Interpreter {
     if (value.type !== 'string') throw new LavaError(`overwrite value must be a string, got ${value.type}`);
     const path = this.resolveClassPath(cls.path);
 
-    if (target.part === 'contents') { writeFileSync(path, value.value); return; }
+    if (target.part === 'contents') { this.writeClass(target.cls, path, cls.path, value.value); return; }
 
     if (target.part === 'name') {
       const dest = this.resolveClassPath(value.value);
       try { renameSync(path, dest); }
-      catch { throw new LavaError(`class '${target.cls}' cannot be renamed to '${value.value}'`); }
+      catch (e) {
+        if (isDenied(e)) throw new LavaError(`class '${target.cls}' is not allowed to write '${value.value}'`);
+        throw new LavaError(`class '${target.cls}' cannot be renamed to '${value.value}'`);
+      }
       cls.path = value.value; // the class now tracks its new location
       return;
     }
 
     // line write
-    let content;
-    try { content = readFileSync(path, 'utf8'); }
-    catch { throw new LavaError(`class '${target.cls}' cannot read its data at '${cls.path}'`); }
+    const content = this.readClass(target.cls, path, cls.path);
     const lines = content.split('\n');
     const idx = target.lineNo === null ? 0 : target.lineNo - 1;
     if (idx < 0 || idx >= lines.length)
       throw new LavaError(`class '${target.cls}' has no line ${target.lineNo} to overwrite`);
     lines[idx] = value.value;
-    writeFileSync(path, lines.join('\n'));
+    this.writeClass(target.cls, path, cls.path, lines.join('\n'));
+  }
+
+  // Every class read and write funnels through these two, so a denied path
+  // reports as denied everywhere rather than only wherever it was remembered.
+  readClass(clsName, path, declaredPath) {
+    try { return readFileSync(path, 'utf8'); }
+    catch (e) {
+      if (isDenied(e)) throw new LavaError(`class '${clsName}' is not allowed to read '${declaredPath}'`);
+      throw new LavaError(`class '${clsName}' cannot read its data at '${declaredPath}'`);
+    }
+  }
+
+  writeClass(clsName, path, declaredPath, content) {
+    try { writeFileSync(path, content); }
+    catch (e) {
+      if (isDenied(e)) throw new LavaError(`class '${clsName}' is not allowed to write '${declaredPath}'`);
+      throw new LavaError(`class '${clsName}' cannot write its data at '${declaredPath}'`);
+    }
   }
 
   checkType(name, types, v) {
@@ -1489,9 +1515,7 @@ class Interpreter {
     const pat = cls.fields.get(field);
     if (!pat) throw new LavaError(`class '${clsName}' has no field '${field}'`);
     const def = this.patterns.get(pat);
-    let content;
-    try { content = readFileSync(this.resolveClassPath(cls.path), 'utf8'); }
-    catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
+    const content = this.readClass(clsName, this.resolveClassPath(cls.path), cls.path);
     const value = applyPattern(def, content);
     const cases = this.states.get(clsName + ' ' + field);
     if (cases && !cases.has(value))
@@ -1504,9 +1528,7 @@ class Interpreter {
   readPart(clsName, part, lineNo) {
     const cls = this.classes.get(clsName);
     if (!cls) throw new LavaError(`No class named '${clsName}'`);
-    let content;
-    try { content = readFileSync(this.resolveClassPath(cls.path), 'utf8'); }
-    catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
+    const content = this.readClass(clsName, this.resolveClassPath(cls.path), cls.path);
     if (part === 'contents') return { type: 'string', value: content };
     const lines = content.split('\n');
     const idx = lineNo === null ? 0 : lineNo - 1;
@@ -1529,11 +1551,9 @@ class Interpreter {
       throw new LavaError(`'${v.value}' is not a declared case of state '${field}'`);
     const def = this.patterns.get(pat);
     const path = this.resolveClassPath(cls.path);
-    let content;
-    try { content = readFileSync(path, 'utf8'); }
-    catch { throw new LavaError(`class '${clsName}' cannot read its data at '${cls.path}'`); }
+    const content = this.readClass(clsName, path, cls.path);
     const span = applyPatternSpan(def, content);
-    writeFileSync(path, content.slice(0, span.begin) + v.value + content.slice(span.end));
+    this.writeClass(clsName, path, cls.path, content.slice(0, span.begin) + v.value + content.slice(span.end));
   }
 }
 
