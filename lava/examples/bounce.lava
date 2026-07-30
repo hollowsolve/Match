@@ -1,0 +1,49 @@
+~ Bouncing balls — the first thing groups make writable.
+~
+~ Positions are plain integer pixels: no fixed-point scale yet, so a body moves at
+~ least one pixel per tick. Gravity is +1 to vertical velocity each tick, and a
+~ bounce reflects the velocity and pins the body back inside the screen, because
+~ drawing outside a screen fails rather than silently dropping the write.
+create screen of size 64 by 64
+
+create group "Bodies" with
+  "X" of type int,
+  "Y" of type int,
+  "Velocity X" of type int,
+  "Velocity Y" of type int
+
+insert element 8, 4, 1, 0 to Bodies
+insert element 24, 10, 2, 0 to Bodies
+insert element 46, 2, -1, 0 to Bodies
+insert element 58, 20, -2, 0 to Bodies
+
+create action "Move" reads Bodies writes Bodies as
+  loop over Bodies as Body
+    update Velocity Y of Body to [Velocity Y from Body + 1]
+    update Y of Body to [Y from Body + Velocity Y from Body]
+    update X of Body to [X from Body + Velocity X from Body]
+  end
+end
+
+create action "Bounce" reads Bodies writes Bodies as
+  loop over Bodies as Body
+    if (Y from Body greater than 62) then update Y of Body to 62, update Velocity Y of Body to [0 - Velocity Y from Body]
+    if (Y from Body less than 1) then update Y of Body to 1, update Velocity Y of Body to [0 - Velocity Y from Body]
+    if (X from Body greater than 62) then update X of Body to 62, update Velocity X of Body to [0 - Velocity X from Body]
+    if (X from Body less than 1) then update X of Body to 1, update Velocity X of Body to [0 - Velocity X from Body]
+  end
+end
+
+create action "Draw" reads Bodies writes Screen as
+  fill screen with rgb 12, 12, 20
+  loop over Bodies as Body
+    set pixel X from Body, Y from Body to white
+  end
+end
+
+loop 60 times
+  Move()
+  Bounce()
+  Draw()
+  show
+end
