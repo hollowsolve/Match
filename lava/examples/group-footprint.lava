@@ -1,0 +1,23 @@
+~ A group obeys capability footprints like any other named state, and a cursor
+~ charges the group it walks — so `update Health of Body` is a write to Bodies,
+~ not to some loop variable the checker cannot see.
+~
+~ This matters more than the usual footprint case. A system that iterates every
+~ entity in the world is exactly the code you most want to be able to audit by
+~ reading its header, so "which systems can write Bodies?" has to stay a grep.
+~
+~ Here the action declares Console and nothing else, then reads a group. Rejected
+~ before the program runs.
+create group "Bodies" with
+  "X" of type int,
+  "Health" of type int >= 0
+
+insert element 1, 10 to Bodies
+
+create action "Peek" writes Console as
+  loop over Bodies as Body
+    print(X from Body)
+  end
+end
+
+Peek()

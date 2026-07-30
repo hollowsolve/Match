@@ -44,6 +44,11 @@ const cases = [
   ['alignment.lava', '', 0, '484\ninside\n3\nhello   world'],
   // `%` remainder, incl. negative dividend sign and remainder-by-zero failing
   ['modulo.lava', '', 1, '1\n0\n5\n-1\n3\n0\n1\n2\n3\n4\n5\n6\n7\n0\n1\nlava: remainder by zero'],
+  // groups: declare/insert/iterate/count, positional insert, nested pair cursors
+  ['groups.lava', '', 0, '2\n60\n74\n1010\n1020\n2010\n2020'],
+  // ...and a cursor charges its GROUP, so a system that walks every entity still
+  // has to declare it — the property that makes footprints worth having at scale
+  ['group-footprint.lava', '', 1, "lava: action 'Peek':\n  - reads 'Bodies' but does not declare it (reads: none)"],
   // actions may loop: cursor needs no declaring, `break` works, loops nest
   ['action-loop.lava', '', 0, '10\n4\n9'],
   // ...and a loop body is still inside the footprint — the guarantee that had to

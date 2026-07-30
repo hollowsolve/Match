@@ -164,6 +164,34 @@ lava: action 'Cheat':
 Actions take no parameters and return no values — the state they update *is* the
 data that needed to pass. They cannot call other actions.
 
+### Groups — many of one shape
+
+```
+create group "Bodies" with
+  "X" of type int,
+  "Y" of type int,
+  "Velocity Y" of type int >= 0
+
+insert element 10, 0, 0 to Bodies
+
+create action "ApplyGravity" reads Bodies writes Bodies as
+  loop over Bodies as Body
+    update Velocity Y of Body to [Velocity Y from Body + 10]
+  end
+end
+```
+
+A container names one value; a group names a **shape** and holds many of it.
+Fields take the same types and bounds a container does, so a guard holds for
+every element — a bound is a property of the shape, not of an instance. Insert
+values are **positional**, in declared field order.
+
+`loop over <group> as <cursor>` walks elements in insertion order. The cursor is
+the loop's own state, so it is never named in a footprint — but it **charges its
+group**: `update X of Body` is a write to `Bodies`. "Which actions can write
+every entity in the world?" stays a header grep. Two cursors over one group is
+how a pair test is written.
+
 ### Patterns — match, under a strict dialect
 
 ```
@@ -377,6 +405,12 @@ create class "<name>" from "<path>" where "<field>" is <pattern>, …
 create state "<name>" from class <class> with states "<case>", …
 create synchronous actions "<name>" as <Call>(), … end
 create screen of size <W> by <H>
+create group "<name>" with "<field>" of type <type> [<bound>], …
+insert element <expr>, … to <group>            ~ positional, in declared order
+loop over <group> as <cursor> … end            ~ walks elements in insert order
+<field> from <cursor>                          ~ read an element's field
+update <field> of <cursor> to <value>          ~ write an element's field
+count(<group>)                                 ~ how many elements
 
 update <name> to <expr>                         ~ container / state write
 update <field> from <class> to <value>          ~ splice a field in place

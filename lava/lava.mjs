@@ -16,7 +16,15 @@
 //     prints must declare `writes Console`
 //   - the top level is ambient authority: it may read/write/print/call freely
 //
-// Not yet: patterns, classes, states, loops, wait, filesystem, UserInput, match.
+// Slice 16 (groups): many of one declared shape.
+//   - create group "name" with "field" of type <type> [bound], …
+//   - insert element <expr>, … to <group>   (positional, declared field order)
+//   - loop over <group> as <cursor> … end   (cursor is loop-local state)
+//   - <field> from <cursor> reads, update <field> of <cursor> writes — the same
+//     from/of asymmetry a class already has
+//   - a cursor CHARGES ITS GROUP in the footprint, so a system that walks every
+//     element still has to declare the group it walks
+//   - count(<group>) — not reserved; recognised by the following '('
 
 import { readFileSync, writeFileSync, renameSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -38,6 +46,7 @@ const KEYWORDS = new Set([
   'UserInput', 'wait', 'synchronous', 'actions',
   'between', 'less', 'greater', 'than',
   'screen', 'size', 'by', 'set', 'pixel', 'fill', 'show', 'rgb',
+  'insert', 'element',
   'EOF',
 ]);
 
@@ -338,6 +347,7 @@ class Parser {
         if (this.inAction) throw new LavaError(`Declarations are not allowed inside an action (line ${tok.line})`);
         return this.parseCreate();
       case 'update': return { kind: 'effects', effects: this.parseEffectList() };
+      case 'insert': return { kind: 'effects', effects: this.parseEffectList() };
       case 'if': return this.parseIf();
       case 'wait': return this.parseWait();
       case 'print': case 'Print': return { kind: 'effects', effects: this.parseEffectList() };
@@ -373,8 +383,25 @@ class Parser {
         throw new LavaError(`screen size must be 1..${MAX_SCREEN_DIM} in each dimension, got ${width} by ${height} (line ${w.line})`);
       return { kind: 'screen', width, height, line: w.line };
     }
+    // create group "Name" with "Field" of type int [bound], ...
+    // A group is many of the same shape. Its fields carry the same types and
+    // bounds a container does, so a guard that holds for one body holds for every
+    // body — the bound is a property of the shape, not of one instance.
+    if (w.value === 'group') {
+      const name = this.expect('string').value;
+      this.expect('word', 'with');
+      const fields = [];
+      do {
+        const field = this.expect('string').value;
+        this.expect('word', 'of'); this.expect('word', 'type');
+        const types = this.parseType();
+        const bound = this.parseBound(types);
+        fields.push({ name: field, types, bound });
+      } while (this.match(','));
+      return { kind: 'group', name, fields, line: w.line };
+    }
     if (w.value !== 'container' && w.value !== 'constant')
-      throw new LavaError(`Expected 'container', 'constant' or 'screen', got '${w.value}' (line ${w.line})`);
+      throw new LavaError(`Expected 'container', 'constant', 'group' or 'screen', got '${w.value}' (line ${w.line})`);
     const name = this.expect('string').value;
     this.expect('word', 'of'); this.expect('word', 'type');
     const types = this.parseType();
@@ -502,11 +529,30 @@ class Parser {
       this.next(); this.expect('('); const expr = this.parseExpr(); this.expect(')');
       return { op: 'print', expr };
     }
+    // insert element <expr>, <expr>, ... to <Group>
+    // Values are positional, in the order the group declares its fields — the
+    // declaration is right there to read, and naming each field at every insert
+    // would be ceremony rather than grammar.
+    if (this.isWord('insert')) {
+      this.next(); this.expect('word', 'element');
+      const values = [this.parseExpr()];
+      while (this.match(',')) values.push(this.parseExpr());
+      this.expect('word', 'to');
+      const group = this.parseName();
+      return { op: 'insert', group, values };
+    }
     if (this.isWord('update')) {
       this.next(); const name = this.parseName();
       if (this.isWord('from')) { // class-field write: update <field> from <Class> to <value>
         this.next(); const cls = this.parseName(); this.expect('word', 'to'); const expr = this.parseExpr();
         return { op: 'updateField', field: name, cls, expr };
+      }
+      // group-element write: update <field> of <cursor> to <value>. `of` names the
+      // write target exactly as it does for a class, and `from` reads — the same
+      // asymmetry, not a second rule.
+      if (this.isWord('of')) {
+        this.next(); const cursor = this.parseName(); this.expect('word', 'to'); const expr = this.parseExpr();
+        return { op: 'updateElement', field: name, cursor, expr };
       }
       this.expect('word', 'to'); const expr = this.parseExpr();
       return { op: 'update', name, expr };
@@ -680,6 +726,18 @@ class Parser {
   parseLoopHeader() {
     this.expect('word', 'loop');
     let local = null, cond = null, count = null, mode = 'infinite';
+    // loop over <Group> as <Cursor> — walks the group's elements in insertion
+    // order. The cursor is the loop's own state, like a loop-local container, so
+    // it is never named in a footprint; the GROUP is what the action declares.
+    if (this.isWord('over')) {
+      this.next();
+      const group = this.parseName();
+      this.expect('word', 'as');
+      const cursor = this.parseName();
+      if (this.peek().type !== 'eol')
+        throw new LavaError(`Unexpected '${this.peek().value}' in loop header (line ${this.peek().line})`);
+      return { mode: 'over', group, cursor, count: null, cond: null, local: null };
+    }
     if (this.peek().type === '(') { this.next(); local = this.parseCreate(); this.expect(')'); }
     if (this.eatWord('until')) {
       this.expect('('); cond = this.parsePred(); this.expect(')'); mode = 'until';
@@ -718,6 +776,14 @@ class Parser {
       return { kind: 'readPart', part: 'line', lineNo, cls };
     }
     if (this.isWord('extract')) return this.parseExtract();
+    // count(<Group>) — how many elements. Detected by the following '(' rather
+    // than reserved, so a container may still be called "count" or "word count".
+    if (tok.type === 'word' && tok.value === 'count' && this.peek(1) && this.peek(1).type === '(') {
+      this.next(); this.next();
+      const group = this.parseName();
+      this.expect(')');
+      return { kind: 'count', group };
+    }
     if (tok.type === 'op' && tok.value === '√') { this.next(); return { kind: 'sqrt', operand: this.parsePrimary() }; }
     if (tok.type === 'op' && tok.value === '-') { this.next(); const n = this.expect('number'); return { kind: 'lit', type: 'int', value: -parseInt(n.value, 10) }; }
     if (tok.type === 'number') { this.next(); return { kind: 'lit', type: 'int', value: parseInt(tok.value, 10) }; }
@@ -819,61 +885,76 @@ class Parser {
 }
 
 // ---------- capability analysis ----------
-// `locals` carries the loop-local cursors in scope. A cursor declared in a loop
-// header is the loop's own state, not the action's, so it must NOT have to appear
-// in the footprint — while everything else the body touches still must. Threading
-// the scope rather than subtracting names afterwards keeps a cursor that shadows
-// nothing from exempting a real container of the same name.
+// `sc` is the lexical scope: `locals` are loop-local containers and `cursors` maps
+// a group cursor to the group it walks. Both exist so a loop's own state does not
+// have to be declared, while everything else the body touches still must. A
+// cursor charges its GROUP — `update X of Body` is a write to Bodies, so the
+// footprint stays a statement about named state rather than about loop variables.
+// Threading the scope rather than subtracting names afterwards stops a cursor
+// from exempting a real container that happens to share its name.
+const emptyScope = () => ({ locals: new Set(), cursors: new Map() });
+
 function collectReadsWrites(stmts) {
   const reads = new Set(), writes = new Set();
-  const expr = (n, locals) => {
-    if (n.kind === 'ref') { if (!locals.has(n.name)) reads.add(n.name); }
+  const expr = (n, sc) => {
+    if (n.kind === 'ref') { if (!sc.locals.has(n.name)) reads.add(n.name); }
     else if (n.kind === 'userinput') reads.add('UserInput');
-    else if (n.kind === 'extract') { if (!locals.has(n.source)) reads.add(n.source); }
-    else if (n.kind === 'read') reads.add(n.cls); // reading a class field charges the class
+    else if (n.kind === 'extract') { if (!sc.locals.has(n.source)) reads.add(n.source); }
+    // `<field> from <name>`: a cursor charges its group, anything else is a class
+    else if (n.kind === 'read') reads.add(sc.cursors.get(n.cls) ?? n.cls);
     else if (n.kind === 'readPart') reads.add(n.cls); // contents/Line from a class
-    else if (n.kind === 'binop') { expr(n.left, locals); expr(n.right, locals); }
-    else if (n.kind === 'sqrt') expr(n.operand, locals);
+    else if (n.kind === 'count') reads.add(n.group);
+    else if (n.kind === 'binop') { expr(n.left, sc); expr(n.right, sc); }
+    else if (n.kind === 'sqrt') expr(n.operand, sc);
   };
-  const color = (c, locals) => {
-    if (c && c.kind === 'rgb') { expr(c.r, locals); expr(c.g, locals); expr(c.b, locals); }
+  const color = (c, sc) => {
+    if (c && c.kind === 'rgb') { expr(c.r, sc); expr(c.g, sc); expr(c.b, sc); }
   };
-  const pred = (n, locals) => {
-    if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left, locals); expr(n.right, locals); }
-    else if (n.kind === 'isCase') expr(n.left, locals);
-    else if (n.kind === 'and' || n.kind === 'or') { pred(n.left, locals); pred(n.right, locals); }
-    else if (n.kind === 'not') pred(n.operand, locals);
+  const pred = (n, sc) => {
+    if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left, sc); expr(n.right, sc); }
+    else if (n.kind === 'isCase') expr(n.left, sc);
+    else if (n.kind === 'and' || n.kind === 'or') { pred(n.left, sc); pred(n.right, sc); }
+    else if (n.kind === 'not') pred(n.operand, sc);
   };
-  const eff = (e, locals) => {
-    if (e.op === 'update') { if (!locals.has(e.name)) writes.add(e.name); expr(e.expr, locals); }
-    else if (e.op === 'updateField') { writes.add(e.cls); expr(e.expr, locals); }
-    else if (e.op === 'print') { writes.add('Console'); expr(e.expr, locals); }
-    else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value, locals); }
+  const eff = (e, sc) => {
+    if (e.op === 'update') { if (!sc.locals.has(e.name)) writes.add(e.name); expr(e.expr, sc); }
+    else if (e.op === 'updateField') { writes.add(e.cls); expr(e.expr, sc); }
+    // writing a field through a cursor is a write to the group it walks
+    else if (e.op === 'updateElement') { writes.add(sc.cursors.get(e.cursor) ?? e.cursor); expr(e.expr, sc); }
+    else if (e.op === 'insert') { writes.add(e.group); e.values.forEach(v => expr(v, sc)); }
+    else if (e.op === 'print') { writes.add('Console'); expr(e.expr, sc); }
+    else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value, sc); }
     // Screen writes. Coordinates and colour channels are expressions, so their
     // reads count toward the footprint too — drawing from a container's value
     // means the action must declare it read.
-    else if (e.op === 'setPixel') { writes.add('Screen'); expr(e.x, locals); expr(e.y, locals); color(e.color, locals); }
-    else if (e.op === 'fillScreen') { writes.add('Screen'); color(e.color, locals); }
+    else if (e.op === 'setPixel') { writes.add('Screen'); expr(e.x, sc); expr(e.y, sc); color(e.color, sc); }
+    else if (e.op === 'fillScreen') { writes.add('Screen'); color(e.color, sc); }
     else if (e.op === 'show') writes.add('Screen');
     // 'break' / 'call' touch no state; a call never appears in an action body
   };
-  const stmt = (s, locals) => {
-    if (s.kind === 'effects') s.effects.forEach(e => eff(e, locals));
+  const stmt = (s, sc) => {
+    if (s.kind === 'effects') s.effects.forEach(e => eff(e, sc));
     else if (s.kind === 'if') {
-      pred(s.pred, locals);
-      s.thenE.forEach(e => eff(e, locals));
-      if (s.elseE) s.elseE.forEach(e => eff(e, locals));
+      pred(s.pred, sc);
+      s.thenE.forEach(e => eff(e, sc));
+      if (s.elseE) s.elseE.forEach(e => eff(e, sc));
     }
     // A loop's body is part of the action's footprint. Without this branch every
     // read and write inside a loop would be invisible to validateFootprint — the
     // guarantee the whole capability model rests on, silently gone.
     else if (s.kind === 'loop') {
-      const inner = s.local ? new Set([...locals, s.local.name]) : locals;
+      let inner = sc;
+      if (s.local) inner = { locals: new Set([...sc.locals, s.local.name]), cursors: sc.cursors };
+      // walking a group reads it, whatever the body then does
+      if (s.mode === 'over') {
+        reads.add(s.group);
+        inner = { locals: sc.locals, cursors: new Map([...sc.cursors, [s.cursor, s.group]]) };
+      }
       if (s.cond) pred(s.cond, inner);
       s.body.forEach(b => stmt(b, inner));
     }
   };
-  stmts.forEach(s => stmt(s, new Set()));
+  stmts.forEach(s => stmt(s, emptyScope()));
   return { reads, writes };
 }
 
@@ -882,6 +963,9 @@ class Interpreter {
   constructor(baseDir = '.') {
     this.env = new Map(); this.actions = new Map(); this.patterns = new Map();
     this.classes = new Map(); this.states = new Map();
+    // groups: name -> { fields: [{name, types, bound}], rows: [Map(field -> value)] }
+    // cursors: an in-scope `loop over G as C` binding, C -> { group, index }
+    this.groups = new Map(); this.cursors = new Map();
     this.names = new Set(); this.constants = new Set();
     this.baseDir = baseDir;
     this.screen = null;  // { width, height, buf } — the Screen origin's framebuffer
@@ -916,6 +1000,12 @@ class Interpreter {
     // multi-word references resolve regardless of declaration order
     for (const u of units) {
       if (u.kind === 'pattern') this.names.add(u.name);
+      // A group's name AND its field names must be known before parsing, or
+      // parseName stops at the first word and "Velocity Y" reads as "Velocity".
+      else if (u.kind === 'stmt' && kw(u.text).startsWith('create group ')) {
+        const quoted = [...u.text.matchAll(/"([^"]*)"/g)].map(m => m[1]);
+        quoted.forEach(n => this.names.add(n));
+      }
       else if (u.kind === 'class' || u.kind === 'state') {
         const quoted = [...u.text.matchAll(/"([^"]*)"/g)].map(m => m[1]);
         if (u.kind === 'class') { this.names.add(quoted[0]); quoted.slice(2).forEach(f => this.names.add(f)); }
@@ -1054,6 +1144,14 @@ class Interpreter {
         units.push({ kind: 'class', text: acc, line });
         continue;
       }
+      // groups continue like a class: no `end`, the field list runs while the
+      // accumulated text still ends on a continuation token
+      if (kw(text) === 'create group' || kw(text).startsWith('create group ')) {
+        let acc = text; this.cursor++;
+        while (this.cursor < this.lines.length && /(,|with)$/.test(acc.trim())) acc += ' ' + this.lines[this.cursor++].text;
+        units.push({ kind: 'stmt', text: acc, line });
+        continue;
+      }
       if (kw(text) === 'create state' || kw(text).startsWith('create state ')) {
         let acc = text; this.cursor++;
         while (this.cursor < this.lines.length && /(,|states)$/.test(acc.trim())) acc += ' ' + this.lines[this.cursor++].text;
@@ -1142,6 +1240,18 @@ class Interpreter {
         if (cell.bound) this.checkBound(stmt.name, cell); // initial value must satisfy
         return;
       }
+      case 'group': {
+        if (this.groups.has(stmt.name) || this.env.has(stmt.name))
+          throw new LavaError(`'${stmt.name}' already exists`);
+        const seen = new Set();
+        for (const f of stmt.fields) {
+          if (seen.has(f.name)) throw new LavaError(`group '${stmt.name}' declares field '${f.name}' twice`);
+          seen.add(f.name);
+        }
+        this.groups.set(stmt.name, { fields: stmt.fields, rows: [] });
+        this.names.add(stmt.name);
+        return;
+      }
       case 'screen': {
         if (this.screen) throw new LavaError(`a screen is already declared (line ${stmt.line})`);
         this.screen = {
@@ -1196,6 +1306,29 @@ class Interpreter {
 
   runLoop(node) {
     const CAP = 1_000_000;
+
+    // loop over <Group> as <Cursor>: walk elements in insertion order. The cursor
+    // binding is restored afterwards so nesting two cursors over the same group —
+    // which is how a pair test is written — cannot clobber the outer one.
+    if (node.mode === 'over') {
+      const g = this.groups.get(node.group);
+      if (!g) throw new LavaError(`No group named '${node.group}' (line ${node.line})`);
+      const had = this.cursors.has(node.cursor);
+      const prevCursor = this.cursors.get(node.cursor);
+      try {
+        // Length is read each step, so an element inserted mid-walk is visited.
+        for (let i = 0; i < g.rows.length; i++) {
+          if (i >= CAP) throw new LavaError(`loop exceeded ${CAP} iterations without 'break' (line ${node.line})`);
+          this.cursors.set(node.cursor, { group: node.group, index: i });
+          this.runBody(node.body);
+        }
+      } catch (e) {
+        if (!(e instanceof BreakSignal)) throw e;
+      } finally {
+        if (had) this.cursors.set(node.cursor, prevCursor); else this.cursors.delete(node.cursor);
+      }
+      return;
+    }
 
     // loop-local container: declared in env for the loop body, restored after
     let localName = null, hadPrev = false, prev = null;
@@ -1305,6 +1438,44 @@ class Interpreter {
       }
       return;
     }
+    // insert element <v>, <v>, ... to <Group> — positional, in declared order.
+    // Arity is checked against the declaration, so a missing or extra value is a
+    // named failure rather than a silently half-built element.
+    if (e.op === 'insert') {
+      const g = this.groups.get(e.group);
+      if (!g) throw new LavaError(`No group named '${e.group}'`);
+      if (e.values.length !== g.fields.length)
+        throw new LavaError(`group '${e.group}' has ${g.fields.length} field${g.fields.length === 1 ? '' : 's'}, but ${e.values.length} value${e.values.length === 1 ? ' was' : 's were'} given`);
+      const row = new Map();
+      for (let i = 0; i < g.fields.length; i++) {
+        const f = g.fields[i];
+        const v = this.evalExpr(e.values[i]);
+        this.checkType(`${f.name} of ${e.group}`, f.types, v);
+        row.set(f.name, v);
+      }
+      g.rows.push(row);
+      // A field bound is a property of the shape, so it holds for a new element
+      // the same way it holds for one that has been updated.
+      this.checkElementBounds(e.group, g, g.rows.length - 1);
+      this.wake();
+      return;
+    }
+    if (e.op === 'updateElement') {
+      const cur = this.cursors.get(e.cursor);
+      if (!cur) throw new LavaError(`'${e.cursor}' is not a group cursor in scope`);
+      const g = this.groups.get(cur.group);
+      const f = g.fields.find(x => x.name === e.field);
+      if (!f) throw new LavaError(`group '${cur.group}' has no field '${e.field}'`);
+      const v = this.evalExpr(e.expr);
+      this.checkType(`${e.field} of ${cur.group}`, f.types, v);
+      const row = g.rows[cur.index];
+      const old = row.get(e.field);
+      row.set(e.field, v);
+      try { this.checkElementBounds(cur.group, g, cur.index); }
+      catch (err) { row.set(e.field, old); throw err; }
+      this.wake();
+      return;
+    }
     if (e.op === 'overwrite') { this.overwrite(e.target, this.evalExpr(e.value)); return; }
     if (e.op === 'updateField') { this.updateField(e.cls, e.field, this.evalExpr(e.expr)); return; }
     if (e.op === 'call') {
@@ -1342,6 +1513,17 @@ class Interpreter {
   // inside one — so the bad state is never observable. (A relational bound reads
   // its reference for validation only; that is language-level enforcement, not
   // part of the action's footprint.)
+  // A group field's bound is checked against the element that just changed, using
+  // the same machinery a container uses — so `"Health" of type int >= 0` fails the
+  // same way, with the same message, whichever element violated it.
+  checkElementBounds(groupName, g, index) {
+    const row = g.rows[index];
+    for (const f of g.fields) {
+      if (!f.bound) continue;
+      this.checkBound(`${f.name} of ${groupName} element ${index + 1}`, { bound: f.bound, value: row.get(f.name) });
+    }
+  }
+
   checkBound(name, cell) {
     if (!cell.bound) return;
     const v = cell.value.value;
@@ -1439,7 +1621,24 @@ class Interpreter {
         if (src.value.type !== 'string') throw new LavaError(`pattern source '${node.source}' must be a string`);
         return { type: 'string', value: applyPattern(def, src.value.value) };
       }
-      case 'read': return { type: 'string', value: this.readField(node.cls, node.field) };
+      // `<field> from <name>`: a cursor in scope means a group element, otherwise
+      // it is a live class read. Resolved here rather than at parse time so a
+      // cursor needs no forward declaration — the loop header introduces it.
+      case 'read': {
+        const cur = this.cursors.get(node.cls);
+        if (cur) {
+          const g = this.groups.get(cur.group);
+          const row = g.rows[cur.index];
+          if (!row.has(node.field)) throw new LavaError(`group '${cur.group}' has no field '${node.field}'`);
+          return row.get(node.field);
+        }
+        return { type: 'string', value: this.readField(node.cls, node.field) };
+      }
+      case 'count': {
+        const g = this.groups.get(node.group);
+        if (!g) throw new LavaError(`No group named '${node.group}'`);
+        return { type: 'int', value: g.rows.length };
+      }
       case 'readPart': return this.readPart(node.cls, node.part, node.lineNo);
       case 'eof': return { type: 'eof', value: 'EOF' };
       case 'userinput': return { type: 'string', value: readLineSync() };

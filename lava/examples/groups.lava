@@ -1,0 +1,45 @@
+~ Groups — many things of one declared shape.
+~
+~ A container names one value. A group names a shape and holds many of them, so a
+~ program can finally say "every body" instead of naming Body One, Body Two and
+~ repeating itself. Fields carry the same types and bounds a container does: a
+~ guard that holds for one element holds for all of them, because the bound is a
+~ property of the shape rather than of any instance.
+create group "Bodies" with
+  "X" of type int,
+  "Y" of type int,
+  "Velocity Y" of type int
+
+~ Values are positional, in the order the fields are declared just above.
+insert element 10, 0, 0 to Bodies
+insert element 20, 5, 3 to Bodies
+
+print(count(Bodies))          ~ 2
+
+~ A cursor walks the group. It is the loop's own state — like a loop-local
+~ container, it is never named in a footprint; the GROUP is what gets declared.
+~ Reads use `from` and writes name the target with `of`, the same asymmetry a
+~ class already has.
+create action "ApplyGravity" reads Bodies writes Bodies as
+  loop over Bodies as Body
+    update Velocity Y of Body to [Velocity Y from Body + 10]
+    update Y of Body to [Y from Body + Velocity Y from Body]
+  end
+end
+
+ApplyGravity()
+ApplyGravity()
+ApplyGravity()
+
+loop over Bodies as Body
+  print(Y from Body)          ~ 60, 74
+end
+
+~ Two cursors over the same group is how a pair test is written — every body
+~ against every other, which is what collision detection needs. The inner cursor
+~ cannot clobber the outer one.
+loop over Bodies as First
+  loop over Bodies as Second
+    print([[X from First * 100] + X from Second])
+  end
+end
