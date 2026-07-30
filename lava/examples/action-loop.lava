@@ -1,0 +1,44 @@
+~ An action may loop. "Flat" was always about COMPOSITION — an action cannot call
+~ another action, so there is no call graph and no borrowed authority — and a loop
+~ composes nothing. Its body stays as statically visible as an `if` body, so the
+~ footprint check sees straight through it.
+create container "Total" of type int with value 0
+
+create action "SumToFive" reads Total writes Total as
+  loop (create container "Step" of type int with value 0) until (Step is 5)
+    update Total to [Total + Step]
+    update Step to [Step + 1]
+  end
+end
+
+SumToFive()
+print(Total)          ~ 10 — the loop cursor is the loop's own state, never declared
+
+~ `break` belongs to the enclosing loop, so it is at home inside one even here.
+create container "Count" of type int with value 0
+
+create action "CountToFour" reads Count writes Count as
+  loop
+    update Count to [Count + 1]
+    if (Count is 4) then break
+  end
+end
+
+CountToFour()
+print(Count)          ~ 4
+
+~ Loops nest inside an action exactly as they do at the top level.
+create container "Cells" of type int with value 0
+
+create action "FillGrid" reads Cells writes Cells as
+  loop (create container "Row" of type int with value 0) until (Row is 3)
+    loop (create container "Column" of type int with value 0) until (Column is 3)
+      update Cells to [Cells + 1]
+      update Column to [Column + 1]
+    end
+    update Row to [Row + 1]
+  end
+end
+
+FillGrid()
+print(Cells)          ~ 9

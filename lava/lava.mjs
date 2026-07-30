@@ -3,10 +3,13 @@
 //
 // Slice 1 (core): containers, constants, update, bracketed math, predicates
 //   (is / and / or / not), if-then-else, print, comments.
-// Slice 2 (actions): flat sealed actions with capability footprints.
+// Slice 2 (actions): sealed actions with capability footprints.
 //   - create action "name" [reads <list>] [writes <list>] as <body> end
 //   - actions are called from the top-level orchestrator: name()
-//   - actions CANNOT call other actions
+//   - actions CANNOT call other actions — that is what "sealed" buys: no call
+//     graph, so no borrowed authority. Actions MAY loop (loops arrived after this
+//     slice and were barred by ordering, not by the principle); a loop body is
+//     walked by collectReadsWrites, so footprints stay exact.
 //   - an action body may only touch state named in its header; the loader
 //     statically rejects any read/write outside the declared footprint
 //   - printing is a write to the built-in `Console` origin, so an action that
@@ -310,8 +313,9 @@ function endsWithAs(text) {
 
 // ---------- parser ----------
 class Parser {
-  constructor(tokens, names, inAction = false) {
+  constructor(tokens, names, inAction = false, inLoop = false) {
     this.t = tokens; this.p = 0; this.names = names; this.inAction = inAction;
+    this.inLoop = inLoop; // a loop body inside an action: `break` is the loop's own
   }
   peek(o = 0) { return this.t[this.p + o]; }
   next() { return this.t[this.p++]; }
@@ -489,7 +493,9 @@ class Parser {
     const tok = this.peek();
     if (this.isWord('break')) {
       this.next();
-      if (this.inAction) throw new LavaError(`'break' cannot appear inside an action (line ${tok.line})`);
+      // `break` belongs to the enclosing loop, so it is fine inside one even in an
+      // action; outside a loop it is still meaningless there.
+      if (this.inAction && !this.inLoop) throw new LavaError(`'break' cannot appear inside an action (line ${tok.line})`);
       return { op: 'break' };
     }
     if (tok.type === 'word' && (tok.value === 'print' || tok.value === 'Print')) {
@@ -813,44 +819,61 @@ class Parser {
 }
 
 // ---------- capability analysis ----------
+// `locals` carries the loop-local cursors in scope. A cursor declared in a loop
+// header is the loop's own state, not the action's, so it must NOT have to appear
+// in the footprint — while everything else the body touches still must. Threading
+// the scope rather than subtracting names afterwards keeps a cursor that shadows
+// nothing from exempting a real container of the same name.
 function collectReadsWrites(stmts) {
   const reads = new Set(), writes = new Set();
-  const expr = (n) => {
-    if (n.kind === 'ref') reads.add(n.name);
+  const expr = (n, locals) => {
+    if (n.kind === 'ref') { if (!locals.has(n.name)) reads.add(n.name); }
     else if (n.kind === 'userinput') reads.add('UserInput');
-    else if (n.kind === 'extract') reads.add(n.source);
+    else if (n.kind === 'extract') { if (!locals.has(n.source)) reads.add(n.source); }
     else if (n.kind === 'read') reads.add(n.cls); // reading a class field charges the class
     else if (n.kind === 'readPart') reads.add(n.cls); // contents/Line from a class
-    else if (n.kind === 'binop') { expr(n.left); expr(n.right); }
-    else if (n.kind === 'sqrt') expr(n.operand);
+    else if (n.kind === 'binop') { expr(n.left, locals); expr(n.right, locals); }
+    else if (n.kind === 'sqrt') expr(n.operand, locals);
   };
-  const color = (c) => {
-    if (c && c.kind === 'rgb') { expr(c.r); expr(c.g); expr(c.b); }
+  const color = (c, locals) => {
+    if (c && c.kind === 'rgb') { expr(c.r, locals); expr(c.g, locals); expr(c.b, locals); }
   };
-  const pred = (n) => {
-    if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left); expr(n.right); }
-    else if (n.kind === 'isCase') expr(n.left);
-    else if (n.kind === 'and' || n.kind === 'or') { pred(n.left); pred(n.right); }
-    else if (n.kind === 'not') pred(n.operand);
+  const pred = (n, locals) => {
+    if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left, locals); expr(n.right, locals); }
+    else if (n.kind === 'isCase') expr(n.left, locals);
+    else if (n.kind === 'and' || n.kind === 'or') { pred(n.left, locals); pred(n.right, locals); }
+    else if (n.kind === 'not') pred(n.operand, locals);
   };
-  const eff = (e) => {
-    if (e.op === 'update') { writes.add(e.name); expr(e.expr); }
-    else if (e.op === 'updateField') { writes.add(e.cls); expr(e.expr); }
-    else if (e.op === 'print') { writes.add('Console'); expr(e.expr); }
-    else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value); }
+  const eff = (e, locals) => {
+    if (e.op === 'update') { if (!locals.has(e.name)) writes.add(e.name); expr(e.expr, locals); }
+    else if (e.op === 'updateField') { writes.add(e.cls); expr(e.expr, locals); }
+    else if (e.op === 'print') { writes.add('Console'); expr(e.expr, locals); }
+    else if (e.op === 'overwrite') { writes.add(e.target.cls); expr(e.value, locals); }
     // Screen writes. Coordinates and colour channels are expressions, so their
     // reads count toward the footprint too — drawing from a container's value
     // means the action must declare it read.
-    else if (e.op === 'setPixel') { writes.add('Screen'); expr(e.x); expr(e.y); color(e.color); }
-    else if (e.op === 'fillScreen') { writes.add('Screen'); color(e.color); }
+    else if (e.op === 'setPixel') { writes.add('Screen'); expr(e.x, locals); expr(e.y, locals); color(e.color, locals); }
+    else if (e.op === 'fillScreen') { writes.add('Screen'); color(e.color, locals); }
     else if (e.op === 'show') writes.add('Screen');
-    // 'break' / 'call' touch no state and never appear in an action body
+    // 'break' / 'call' touch no state; a call never appears in an action body
   };
-  const stmt = (s) => {
-    if (s.kind === 'effects') s.effects.forEach(eff);
-    else if (s.kind === 'if') { pred(s.pred); s.thenE.forEach(eff); if (s.elseE) s.elseE.forEach(eff); }
+  const stmt = (s, locals) => {
+    if (s.kind === 'effects') s.effects.forEach(e => eff(e, locals));
+    else if (s.kind === 'if') {
+      pred(s.pred, locals);
+      s.thenE.forEach(e => eff(e, locals));
+      if (s.elseE) s.elseE.forEach(e => eff(e, locals));
+    }
+    // A loop's body is part of the action's footprint. Without this branch every
+    // read and write inside a loop would be invisible to validateFootprint — the
+    // guarantee the whole capability model rests on, silently gone.
+    else if (s.kind === 'loop') {
+      const inner = s.local ? new Set([...locals, s.local.name]) : locals;
+      if (s.cond) pred(s.cond, inner);
+      s.body.forEach(b => stmt(b, inner));
+    }
   };
-  stmts.forEach(stmt);
+  stmts.forEach(s => stmt(s, new Set()));
   return { reads, writes };
 }
 
@@ -1059,21 +1082,24 @@ class Interpreter {
     return units;
   }
 
-  buildStatements(units, inAction) {
-    return units.map(u => this.buildStatement(u, inAction));
+  buildStatements(units, inAction, inLoop = false) {
+    return units.map(u => this.buildStatement(u, inAction, inLoop));
   }
-  buildStatement(u, inAction) {
+  buildStatement(u, inAction, inLoop = false) {
     if (u.kind === 'action') throw new LavaError(`Cannot declare an action here (line ${u.line})`);
     if (u.kind === 'pattern') throw new LavaError(`Cannot declare a pattern here (line ${u.line})`);
     if (u.kind === 'class' || u.kind === 'state') throw new LavaError(`Cannot declare a ${u.kind} here (line ${u.line})`);
     if (u.kind === 'sync') throw new LavaError(`Cannot declare synchronous actions here (line ${u.line})`);
+    // Actions may loop. Flatness was about COMPOSITION — an action cannot call
+    // another action, so there is no call graph and no borrowed authority — and a
+    // loop composes nothing. Its body is as statically visible as an `if` body, so
+    // collectReadsWrites walks it and the footprint stays exact.
     if (u.kind === 'loop') {
-      if (inAction) throw new LavaError(`Actions cannot loop (line ${u.line})`);
       const hdr = new Parser(lexLine(u.header, u.line), this.names).parseLoopHeader();
-      const body = this.buildStatements(u.bodyUnits, false);
+      const body = this.buildStatements(u.bodyUnits, inAction, true);
       return { kind: 'loop', ...hdr, body, line: u.line };
     }
-    return new Parser(lexLine(u.text, u.line), this.names, inAction).parseStatement();
+    return new Parser(lexLine(u.text, u.line), this.names, inAction, inLoop).parseStatement();
   }
 
   validateFootprint(hdr, body) {

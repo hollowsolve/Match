@@ -34,9 +34,11 @@ go
 
 - **The program is a map, not a script.** Every value has a declared origin;
   every effect is guarded.
-- **Actions are flat, sealed leaves.** An action reads its declared inputs and
+- **Actions are sealed leaves.** An action reads its declared inputs and
   writes its declared outputs — nothing else. **Actions cannot call other
-  actions.** All composition lives in the top-level orchestrator.
+  actions.** All composition lives in the top-level orchestrator. An action *may*
+  loop: a loop composes nothing, so it creates no call graph and no borrowed
+  authority, and its body is walked by the same load-time footprint check.
 - **Capability footprints.** An action may only touch state named in its header,
   enforced *before the program runs*. "Which actions can write the auth file?"
   is a header grep — and privilege escalation is structurally impossible, not

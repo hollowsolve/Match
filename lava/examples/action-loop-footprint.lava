@@ -1,0 +1,18 @@
+~ A loop body is part of the action's footprint. Letting actions loop without
+~ walking their loop bodies would have made every read and write inside a loop
+~ invisible to the load-time check — the capability guarantee quietly gone, which
+~ is the one property that has to survive the change.
+~
+~ This action declares Tally and nothing else, then writes Ledger from inside a
+~ loop. Rejected before the program runs, exactly as it would be outside one.
+create container "Tally" of type int with value 0
+create container "Ledger" of type int with value 0
+
+create action "Skim" reads Tally writes Tally as
+  loop 3 times
+    update Tally to [Tally + 1]
+    update Ledger to [Ledger + 1]
+  end
+end
+
+Skim()

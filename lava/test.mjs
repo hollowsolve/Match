@@ -44,6 +44,11 @@ const cases = [
   ['alignment.lava', '', 0, '484\ninside\n3\nhello   world'],
   // `%` remainder, incl. negative dividend sign and remainder-by-zero failing
   ['modulo.lava', '', 1, '1\n0\n5\n-1\n3\n0\n1\n2\n3\n4\n5\n6\n7\n0\n1\nlava: remainder by zero'],
+  // actions may loop: cursor needs no declaring, `break` works, loops nest
+  ['action-loop.lava', '', 0, '10\n4\n9'],
+  // ...and a loop body is still inside the footprint — the guarantee that had to
+  // survive letting actions loop at all
+  ['action-loop-footprint.lava', '', 1, "lava: action 'Skim':\n  - reads 'Ledger' but does not declare it (reads: Tally)\n  - writes 'Ledger' but does not declare it (writes: Tally)"],
   // expected-rejection cases: nonzero exit
   ['escalation.lava', '', 1, null],
   // drawing obeys footprints: an action that draws must declare `writes Screen`
