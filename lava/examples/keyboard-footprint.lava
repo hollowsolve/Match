@@ -1,0 +1,13 @@
+~ Keyboard is a read-only origin, so asking it anything is a read and an action
+~ that asks must declare it. Input does not get a pass on footprints: on a
+~ platform where other people's code runs in your world, "which systems respond to
+~ the player?" has to stay a header grep, same as "which can write the auth file?".
+~
+~ This action reads Keyboard and declares only Paddle X. Rejected at load.
+create container "Paddle X" of type int with value 16
+
+create action "Steer" reads Paddle X writes Paddle X as
+  if (Keyboard holds "left") then update Paddle X to [Paddle X - 1]
+end
+
+Steer()

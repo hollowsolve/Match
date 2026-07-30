@@ -192,6 +192,42 @@ group**: `update X of Body` is a write to `Bodies`. "Which actions can write
 every entity in the world?" stays a header grep. Two cursors over one group is
 how a pair test is written.
 
+### Serve mode — the host owns the clock
+
+```
+node lava.mjs game.lava --serve Tick
+```
+
+Run to completion and a program computes every frame as fast as it can, then
+exits — there is no moment at which it is alive, so a keypress has nowhere to
+land and pacing means nothing. In serve mode the top level runs once as setup and
+then the program waits, one line per command on stdin:
+
+```
+keys left,space   ~ set the Keyboard origin's held set (bare `keys` clears it)
+tick              ~ call the named action once, then flush a frame if anything drew
+quit
+```
+
+Blocking between commands **is** the pacing: the host has a clock, Lava never
+learns what a second is.
+
+`Keyboard` is a read-only origin like `UserInput`, but level-triggered — it
+answers "is this key down right now", so a tick can ask without consuming
+anything:
+
+```
+create action "Steer" reads Keyboard, Paddle X writes Paddle X as
+  if (Keyboard holds "left" and Paddle X greater than 3) then update Paddle X to [Paddle X - 1]
+end
+```
+
+Asking is a read, so an action that responds to input must declare `reads
+Keyboard` — "what responds to the player?" stays a header grep. Note the guard in
+the predicate: a bound is **checked, not clamped**, so driving `Paddle X` past it
+fails the program rather than pinning it. That is right for state where being out
+of range is a bug, and something to remember at a screen edge.
+
 ### Patterns — match, under a strict dialect
 
 ```
@@ -411,6 +447,8 @@ loop over <group> as <cursor> … end            ~ walks elements in insert orde
 <field> from <cursor>                          ~ read an element's field
 update <field> of <cursor> to <value>          ~ write an element's field
 count(<group>)                                 ~ how many elements
+Keyboard holds "<key>"                         ~ predicate; read-only origin
+--serve <Action>                               ~ resident: host ticks, Lava waits
 
 update <name> to <expr>                         ~ container / state write
 update <field> from <class> to <value>          ~ splice a field in place

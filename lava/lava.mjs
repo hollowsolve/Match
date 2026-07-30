@@ -44,6 +44,7 @@ const KEYWORDS = new Set([
   'class', 'where', 'state', 'states',
   'overwrite', 'contents', 'name', 'Line', 'of',
   'UserInput', 'wait', 'synchronous', 'actions',
+  'Keyboard', 'holds',
   'between', 'less', 'greater', 'than',
   'screen', 'size', 'by', 'set', 'pixel', 'fill', 'show', 'rgb',
   'insert', 'element',
@@ -66,7 +67,10 @@ const FRAME_MARKER = '[[lava:frame';
 const MAX_SCREEN_DIM = 512;
 const BINOPS = new Set(['+', '-', '*', '/', '%', '^', '√']);
 // origins are direction-typed: Console is write-only, UserInput is read-only.
-const READABLE_ORIGINS = new Set(['UserInput']);
+// Keyboard is a read-only origin like UserInput, but it is a LEVEL rather than a
+// stream: it answers "is this key down right now", so a tick can ask without
+// consuming anything. The host sets it between ticks (see serve mode).
+const READABLE_ORIGINS = new Set(['UserInput', 'Keyboard']);
 const WRITABLE_ORIGINS = new Set(['Console', 'Screen']);
 
 class LavaError extends Error {}
@@ -805,6 +809,14 @@ class Parser {
   parseNot() {
     if (this.eatWord('not')) return { kind: 'not', operand: this.parseNot() };
     if (this.peek().type === '(') { this.next(); const p = this.parsePred(); this.expect(')'); return p; }
+    // Keyboard holds "left" — a predicate, not a value, because a held key is a
+    // condition that is true right now rather than something you can store.
+    if (this.isWord('Keyboard')) {
+      this.next();
+      this.expect('word', 'holds');
+      const key = this.expect('string').value;
+      return { kind: 'holds', key };
+    }
     const left = this.parseExpr();
     const cmp = this.parseComparator();
     if (cmp === null)
@@ -912,6 +924,7 @@ function collectReadsWrites(stmts) {
   };
   const pred = (n, sc) => {
     if (n.kind === 'is' || n.kind === 'cmp') { expr(n.left, sc); expr(n.right, sc); }
+    else if (n.kind === 'holds') reads.add('Keyboard'); // asking the origin is a read of it
     else if (n.kind === 'isCase') expr(n.left, sc);
     else if (n.kind === 'and' || n.kind === 'or') { pred(n.left, sc); pred(n.right, sc); }
     else if (n.kind === 'not') pred(n.operand, sc);
@@ -966,6 +979,7 @@ class Interpreter {
     // groups: name -> { fields: [{name, types, bound}], rows: [Map(field -> value)] }
     // cursors: an in-scope `loop over G as C` binding, C -> { group, index }
     this.groups = new Map(); this.cursors = new Map();
+    this.keysHeld = new Set(); // the Keyboard origin's level, set by the host between ticks
     this.names = new Set(); this.constants = new Set();
     this.baseDir = baseDir;
     this.screen = null;  // { width, height, buf } — the Screen origin's framebuffer
@@ -1675,6 +1689,7 @@ class Interpreter {
       case 'and': return this.evalPred(node.left) && this.evalPred(node.right);
       case 'or': return this.evalPred(node.left) || this.evalPred(node.right);
       case 'not': return !this.evalPred(node.operand);
+      case 'holds': return this.keysHeld.has(node.key);
       case 'is': {
         const l = this.evalExpr(node.left), r = this.evalExpr(node.right);
         // EOF compares structurally: a line read either is EOF or it isn't —
@@ -1725,6 +1740,16 @@ class Interpreter {
         if (valid && !valid.has(c.name)) throw new LavaError(`'${c.name}' is not a declared case of this state`);
         return v === c.name;
     }
+  }
+
+  // Call a declared action by name from outside the program. Footprints were
+  // validated at load, so the host cannot use this to reach past them — it is the
+  // same call the orchestrator would make, just made by the clock instead.
+  callAction(name) {
+    const def = this.actions.get(name);
+    if (!def) throw new LavaError(`No action named '${name}'`);
+    if (def.sync) this.runSync(def);
+    else def.body.forEach(s => this.exec(s));
   }
 
   // resolve a class path (~, absolute, or relative to the .lava file)
@@ -1785,16 +1810,72 @@ class Interpreter {
 function num(x) { return { type: Number.isInteger(x) ? 'int' : 'float', value: x }; }
 
 // ---------- CLI ----------
-const file = process.argv[2];
-if (!file) { console.error('usage: node lava.mjs <file.lava>'); process.exit(2); }
+//
+//   node lava.mjs <file.lava>                  run to completion
+//   node lava.mjs <file.lava> --serve <Action> resident: the HOST owns the clock
+//
+// Serve mode exists because a game is not a batch render. Run to completion and
+// the program computes every frame as fast as it can and exits — there is no
+// moment at which it is alive and waiting for you, so a keypress has nowhere to
+// land and pacing is meaningless.
+//
+// Instead the program declares its state and its actions, the top level runs once
+// as setup, and then the host drives: one line per command on stdin, blocking
+// between them. Blocking is the point — it is what paces the program to the
+// host's clock, so Lava itself stays timeless and never learns what a second is.
+//
+//   keys <a,b,c>   set the Keyboard origin's held set (empty clears it)
+//   tick           call <Action> once, then flush a frame if anything was drawn
+//   quit           leave
+//
+// Frames go out on stdout in the usual [[lava:frame …]] form, so every existing
+// reader keeps working.
+const args = process.argv.slice(2);
+const serveAt = args.indexOf('--serve');
+const serveAction = serveAt === -1 ? null : args[serveAt + 1];
+// `i !== serveAt + 1` skips the action name — but only when --serve is present,
+// or serveAt + 1 is 0 and the file itself gets skipped.
+const file = args.find((a, i) => !a.startsWith('--') && !(serveAt !== -1 && i === serveAt + 1));
+
+if (!file) { console.error('usage: node lava.mjs <file.lava> [--serve <Action>]'); process.exit(2); }
+if (serveAt !== -1 && !serveAction) { console.error('usage: --serve needs an action name'); process.exit(2); }
+
 const interp = new Interpreter(dirname(file));
 try {
   interp.run(readFileSync(file, 'utf8'));
-  interp.flushScreen(); // drew but never said `show` — still meant to be seen
+  if (!serveAction) {
+    interp.flushScreen(); // drew but never said `show` — still meant to be seen
+  } else {
+    if (!interp.actions.has(serveAction))
+      throw new LavaError(`--serve names '${serveAction}', which the program does not declare as an action`);
+    interp.flushScreen(); // whatever setup drew is the first frame
+    serve(interp, serveAction);
+  }
 } catch (e) {
   // A failed run still shows what it managed to draw: the last good frame is
   // usually the evidence for why it failed.
   try { interp.flushScreen(); } catch {}
   if (e instanceof LavaError) { console.error('lava: ' + e.message); process.exit(1); }
   throw e;
+}
+
+function serve(interpreter, actionName) {
+  while (true) {
+    const line = readLineSync();
+    if (line === 'quit' || line === '') return; // '' is EOF: the host went away
+    if (line.startsWith('keys ')) {
+      const held = line.slice(5).split(',').map(k => k.trim()).filter(Boolean);
+      interpreter.keysHeld = new Set(held);
+      continue;
+    }
+    if (line === 'keys') { interpreter.keysHeld = new Set(); continue; }
+    if (line === 'tick') {
+      interpreter.callAction(actionName);
+      interpreter.flushScreen();
+      continue;
+    }
+    // An unknown command is the host's bug, not the program's, so say so on
+    // stderr and keep serving rather than killing a running game.
+    process.stderr.write(`lava: unknown serve command '${line}'\n`);
+  }
 }

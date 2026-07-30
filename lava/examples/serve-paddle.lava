@@ -1,0 +1,60 @@
+~ A live program: the HOST owns the clock.
+~
+~ Run this with --serve Tick and nothing happens until something asks for a tick:
+~
+~   node lava.mjs examples/serve-paddle.lava --serve Tick
+~
+~ then feed it lines on stdin — `keys left`, `tick`, `keys`, `tick`, `quit`. That
+~ is the whole difference between this and bounce.lava: there, the program owned
+~ the loop and computed every frame as fast as it could, so a keypress had nowhere
+~ to land. Here it runs one tick per command and waits, which is what makes both
+~ pacing and input possible.
+~
+~ Note the footprints. Steer declares `reads Keyboard`, so "what responds to
+~ input?" is still a header grep, exactly like "what can write the auth file?".
+create screen of size 32 by 32
+
+create container "Paddle X" of type int between 3 and 28 with value 16
+
+create group "Bodies" with
+  "X" of type int,
+  "Y" of type int,
+  "Velocity Y" of type int
+
+insert element 8, 2, 0 to Bodies
+insert element 22, 6, 0 to Bodies
+
+~ The bound is checked, not clamped: driving Paddle X to 2 FAILS the program
+~ rather than pinning it at 3. That is right for state where being out of range is
+~ a bug, and wrong for a paddle at the wall — so the guard belongs in the
+~ predicate. Worth knowing before every game you write dies at a screen edge.
+create action "Steer" reads Keyboard, Paddle X writes Paddle X as
+  if (Keyboard holds "left" and Paddle X greater than 3) then update Paddle X to [Paddle X - 1]
+  if (Keyboard holds "right" and Paddle X less than 28) then update Paddle X to [Paddle X + 1]
+end
+
+create action "Fall" reads Bodies writes Bodies as
+  loop over Bodies as Body
+    update Velocity Y of Body to [Velocity Y from Body + 1]
+    update Y of Body to [Y from Body + Velocity Y from Body]
+    if (Y from Body greater than 29) then update Y of Body to 2, update Velocity Y of Body to 0
+  end
+end
+
+create action "Draw" reads Bodies, Paddle X writes Screen as
+  fill screen with rgb 10, 10, 18
+  loop over Bodies as Body
+    set pixel X from Body, Y from Body to white
+  end
+  set pixel [Paddle X - 2], 30 to cyan
+  set pixel [Paddle X - 1], 30 to cyan
+  set pixel Paddle X, 30 to cyan
+  set pixel [Paddle X + 1], 30 to cyan
+  set pixel [Paddle X + 2], 30 to cyan
+end
+
+~ Actions cannot call actions, so the tick entry point is a synchronous block —
+~ its footprint is the union of the three, and they commit as one unit.
+create synchronous actions "Tick" as
+  Steer(), Fall(), Draw()
+end
